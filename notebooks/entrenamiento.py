@@ -5,6 +5,13 @@ SCRIPT: Sintonización Bayesiana Unificada con W&B y Backtesting Walk-Forward
 ARQUITECTURAS: Logistic Regression, Random Forest, XGBoost y Tabular MLP
 ===============================================================================
 """
+import os
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+
+import joblib
+from joblib import parallel_backend
+from joblib.externals.loky import get_reusable_executor
 
 import gc
 import warnings
@@ -247,17 +254,23 @@ def train_sweep_iteration():
             metrics = calcular_metricas(y_va, probs)
 
         elif cfg.model_family == "random_forest":
+            # Fijamos un número razonable de hilos (ej. 6 u 8) para no saturar el SO
+            num_cpus = max(1, os.cpu_count() - 2) if os.cpu_count() else 4
+
             model = RandomForestClassifier(
                 n_estimators=200,
                 max_depth=cfg.max_depth,
                 min_samples_leaf=cfg.min_samples_leaf,
                 max_features=cfg.max_features,
                 class_weight="balanced",
-                random_state=42,
-                n_jobs=-1
+                random_state=42
             )
-            model.fit(X_tr, y_tr)
-            probs = model.predict_proba(X_va)[:, 1]
+            
+            # Usar hilos en lugar de procesos evita los cuelgues de memoria compartida en Windows
+            with parallel_backend('threading', n_jobs=num_cpus):
+                model.fit(X_tr, y_tr)
+                probs = model.predict_proba(X_va)[:, 1]
+
             metrics = calcular_metricas(y_va, probs)
 
         elif cfg.model_family == "xgboost":
@@ -294,6 +307,16 @@ def train_sweep_iteration():
         f2s.append(metrics["f2_score"])
 
     # Logueo del promedio de métricas sobre los 14 folds
+    wandb.log({
+        "mean_pr_auc": float(np.mean(pr_aucs)),
+        "mean_f2_score": float(np.mean(f2s))
+    })
+    # Forzar apagado de procesos huérfanos y limpieza de RAM
+    if cfg.model_family == "random_forest":
+        get_reusable_executor().shutdown(wait=True)
+    
+    gc.collect()
+
     wandb.log({
         "mean_pr_auc": float(np.mean(pr_aucs)),
         "mean_f2_score": float(np.mean(f2s))
