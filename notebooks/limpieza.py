@@ -4,8 +4,12 @@ PROYECTO: Predicción de la Pobreza mediante Machine Learning (EPH 2016-2026)
 AUTOR: Marcelo Gabriel Ulrich | Licenciatura en Ciencia de Datos - UNSAM
 DIRECTORES: César Germán Santamaría | Agustín Moro
 ===============================================================================
-Script de consolidación a nivel HOGAR con escritura incremental en Parquet
-y prevención de fragmentación de memoria.
+Script de consolidación a nivel HOGAR con escritura incremental en Parquet.
+Incluye:
+- Exclusión metodológica del 2T 2020 (ASPO)
+- Filtrado estricto de respondentes (ITF > 0)
+- Separación de GBA en CABA y Conurbano (7 regiones)
+- Supresión de enfoque "Hogar Tipo 2"
 """
 
 import os
@@ -22,11 +26,9 @@ warnings.filterwarnings("ignore")
 
 import xlrd
 
-# Redirigir el stream de log de xlrd a devnull
 xlrd_log = open(os.devnull, 'w')
 if hasattr(xlrd, 'open_workbook'):
     defaults = list(xlrd.open_workbook.__defaults__)
-    # El segundo parámetro por defecto de open_workbook es el objeto 'logfile'
     defaults[1] = xlrd_log
     xlrd.open_workbook.__defaults__ = tuple(defaults)
 
@@ -41,7 +43,6 @@ OUTPUT_PARQUET = Path("data/eph_hogares_consolidada_2016_2026.parquet")
 AÑOS = range(2016, 2027)
 TRIMESTRES = range(1, 5)
 
-# Variables monetarias y administrativas a descartar en la carga
 COLS_TO_DROP = {
     # Ingresos individuales y deciles (Target Leakage)
     "p21", "tot_p12", "p47t", "ipcf", "t_vi", "decocur", "rdecocur", "adecocur",
@@ -71,7 +72,7 @@ COLS_TO_DROP = {
 }
 
 # =============================================================================
-# 2. TABLA OFICIAL DE ADULTO EQUIVALENTE (INDEC)
+# 2. ADULTO EQUIVALENTE OFICIAL (INDEC)
 # =============================================================================
 def calcular_adulto_equivalente(df_i: pd.DataFrame) -> pd.DataFrame:
     cond_v = df_i['ch04'] == 1
@@ -106,7 +107,7 @@ def calcular_adulto_equivalente(df_i: pd.DataFrame) -> pd.DataFrame:
     return df_i.assign(adequi=adequi)
 
 # =============================================================================
-# 3. ARMONIZACIÓN DE VARIABLES CAMBIANTES DE VIVIENDA
+# 3. ARMONIZACIÓN DE VARIABLES DE VIVIENDA
 # =============================================================================
 def reconstruir_variables_vivienda(df_h: pd.DataFrame) -> pd.DataFrame:
     df_h = df_h.copy()
@@ -138,7 +139,6 @@ def reconstruir_variables_vivienda(df_h: pd.DataFrame) -> pd.DataFrame:
 def procesar_agregados_hogar(df_i: pd.DataFrame) -> pd.DataFrame:
     df_i = calcular_adulto_equivalente(df_i)
     
-    # Asignación limpia sin fragmentación
     df_i = df_i.assign(
         es_menor_14=(df_i['ch06'] < 14).astype(int),
         es_adulto_mayor=(df_i['ch06'] >= 65).astype(int),
@@ -151,7 +151,6 @@ def procesar_agregados_hogar(df_i: pd.DataFrame) -> pd.DataFrame:
         solo_salud_publica=(df_i.get('ch08', 0) == 4).astype(int)
     )
     
-    # 1. Agregación a nivel Hogar
     hogar_agg = df_i.groupby(['codusu', 'nro_hogar']).agg(
         cant_miembros=('ch06', 'count'),
         cant_menores_14=('es_menor_14', 'sum'),
@@ -175,7 +174,6 @@ def procesar_agregados_hogar(df_i: pd.DataFrame) -> pd.DataFrame:
         tasa_desocupacion_hogar=lambda df: np.where(df['cant_activos'] > 0, df['cant_desocupados'] / df['cant_activos'], 0.0)
     ).reset_index()
 
-    # 2. Atributos del Jefe/a de Hogar (ch03 == 1)
     jefes = df_i[df_i['ch03'] == 1].drop_duplicates(subset=['codusu', 'nro_hogar'])
     jefes_features = pd.DataFrame({
         'codusu': jefes['codusu'],
@@ -194,7 +192,7 @@ def procesar_agregados_hogar(df_i: pd.DataFrame) -> pd.DataFrame:
 # 5. PIPELINE PRINCIPAL: STREAMING INCREMENTAL A PARQUET
 # =============================================================================
 def ejecutar_pipeline():
-    print("--- INICIANDO PIPELINE INCREMENTAL (CERO CONSUMO EXCESIVO DE RAM) ---")
+    print("--- INICIANDO PIPELINE (7 REGIONES, SIN 2T2020 Y SOLO RESPONDENTES) ---")
     
     if not CBT_FILE.exists():
         raise FileNotFoundError(f"No se encontró el archivo: {CBT_FILE}")
@@ -216,7 +214,8 @@ def ejecutar_pipeline():
     for año in AÑOS:
         año_corto = str(año)[-2:]
         for trim in TRIMESTRES:
-            if año == 2016 and trim == 1:
+            # Exclusión de 1T 2016 (emergencia estadística) y 2T 2020 (ASPO)
+            if (año == 2016 and trim == 1) or (año == 2020 and trim == 2):
                 continue
                 
             re_hogar = re.compile(rf"(?i)usu_hogar_t{trim}{año_corto}\.xlsx?")
@@ -232,9 +231,8 @@ def ejecutar_pipeline():
             if cbt_row.empty:
                 print(f"[ALERTA] Sin CBT para T{trim} {año}. Se omite.")
                 continue
-            cbt_valor = cbt_row['CBT'].values[0]
+            cbt_valor = float(cbt_row['CBT'].values[0])
             
-            # Carga puntual descartando columnas de fuga monetaria
             df_h = pd.read_excel(DATA_DIR / file_h, usecols=lambda c: c.lower() not in COLS_TO_DROP)
             df_i = pd.read_excel(DATA_DIR / file_i, usecols=lambda c: c.lower() not in COLS_TO_DROP)
             
@@ -246,77 +244,74 @@ def ejecutar_pipeline():
             df_h['nro_hogar'] = pd.to_numeric(df_h['nro_hogar'], errors='coerce').fillna(1).astype(int)
             df_i['nro_hogar'] = pd.to_numeric(df_i['nro_hogar'], errors='coerce').fillna(1).astype(int)
             
-            # Reconstruir vivienda y procesar personas agregadas
+            # Filtro de respondentes de ingresos
+            if 'itf' not in df_h.columns:
+                print(f"[ALERTA] Columna 'itf' ausente en T{trim} {año}. Se omite.")
+                continue
+                
+            df_h['itf'] = pd.to_numeric(df_h['itf'], errors='coerce').fillna(0.0)
+            df_h = df_h[df_h['itf'] > 0].copy()
+            if df_h.empty:
+                continue
+            
+            # Partición regional: CABA vs Conurbano vs Resto de Regiones
+            df_h['aglomerado'] = pd.to_numeric(df_h.get('aglomerado', np.nan), errors='coerce')
+            df_h['region'] = pd.to_numeric(df_h.get('region', np.nan), errors='coerce')
+
+            conds_region = [
+                df_h['aglomerado'] == 32,
+                df_h['aglomerado'] == 33,
+                df_h['region'] == 40,
+                df_h['region'] == 41,
+                df_h['region'] == 42,
+                df_h['region'] == 43,
+                df_h['region'] == 44
+            ]
+            choices_region = [
+                'CABA', 'Conurbano', 'NOA', 'NEA', 'Cuyo', 'Pampeana', 'Patagonia'
+            ]
+            
+            df_h['region_estudio'] = np.select(conds_region, choices_region, default='Otro')
+            df_h = df_h.drop(columns=[col for col in ['aglomerado', 'region'] if col in df_h.columns])
+            
+            # Reconstrucción de vivienda y procesamiento individual
             df_h = reconstruir_variables_vivienda(df_h)
             df_i_agg = procesar_agregados_hogar(df_i)
             
-            # MERGE A NIVEL HOGAR (CADA FILA ES UN HOGAR)
             hogar_consolidado = df_h.merge(df_i_agg, on=['codusu', 'nro_hogar'], how='inner')
+            if hogar_consolidado.empty:
+                continue
             
-            # Ratios habitacionales
+            # Variables de hacinamiento
             habitaciones = pd.to_numeric(hogar_consolidado.get('ii1', np.nan), errors='coerce').fillna(1)
             hogar_consolidado['personas_por_cuarto'] = hogar_consolidado['cant_miembros'] / np.maximum(habitaciones, 1)
             hogar_consolidado['hacinamiento_critico'] = (hogar_consolidado['personas_por_cuarto'] > 3).astype(float)
             
-            # ETIQUETADO DE TARGETS (OFICIAL vs. HOGAR TIPO 2)
-            if 'itf' in hogar_consolidado.columns:
-                itf = pd.to_numeric(hogar_consolidado['itf'], errors='coerce').fillna(0)
-            else:
-                itf = pd.Series(0.0, index=hogar_consolidado.index, dtype='float32')
+            # Target oficial INDEC
+            hogar_consolidado['linea_pobreza'] = (cbt_valor * hogar_consolidado['adequi_hogar']).astype('float32')
+            hogar_consolidado['pobre'] = (hogar_consolidado['itf'] < hogar_consolidado['linea_pobreza']).astype('int32')
+            
+            # Eliminación de ITF para evitar filtración (leakage)
+            hogar_consolidado = hogar_consolidado.drop(columns=['itf'])
 
-            # Respondentes con ingresos positivos declarados
-            cond_resp = itf > 0
-
-            # -----------------------------------------------------------------
-            # 1. Enfoque Oficial INDEC (Adultos equivalentes reales del hogar)
-            # -----------------------------------------------------------------
-            hogar_consolidado['linea_pobreza_oficial'] = (
-                cbt_valor * hogar_consolidado['adequi_hogar']
-            ).astype('float32')
-
-            hogar_consolidado['pobre_oficial'] = np.nan
-            hogar_consolidado.loc[cond_resp, 'pobre_oficial'] = (
-                itf.loc[cond_resp] < hogar_consolidado.loc[cond_resp, 'linea_pobreza_oficial']
-            ).astype('float32')
-
-            # -----------------------------------------------------------------
-            # 2. Enfoque Hogar Tipo 2 (3.09 adultos equivalentes fijos)
-            # -----------------------------------------------------------------
-            linea_t2_valor = float(cbt_valor * 3.09)
-            hogar_consolidado['linea_pobreza_tipo2'] = np.float32(linea_t2_valor)
-
-            hogar_consolidado['pobre_tipo2'] = np.nan
-            # Comparamos la Serie directamente contra el escalar (broadcasting seguro)
-            hogar_consolidado.loc[cond_resp, 'pobre_tipo2'] = (
-                itf.loc[cond_resp] < linea_t2_valor
-            ).astype('float32')
-
-
-            # Variables temporales fijas
             if 'ano4' not in hogar_consolidado.columns:
                 hogar_consolidado['ano4'] = año
             if 'trimestre' not in hogar_consolidado.columns:
                 hogar_consolidado['trimestre'] = trim
                 
-            # Eliminar itf una vez etiquetado para evitar data leakage
-            if 'itf' in hogar_consolidado.columns:
-                hogar_consolidado = hogar_consolidado.drop(columns=['itf'])
-                
-            # Homogeneización estricta de columnas y tipos para PyArrow
             if columnas_fijas is None:
                 columnas_fijas = list(hogar_consolidado.columns)
             else:
                 hogar_consolidado = hogar_consolidado.reindex(columns=columnas_fijas)
                 
             for col in columnas_fijas:
-                if col == 'codusu':
+                if col in ['codusu', 'region_estudio']:
                     hogar_consolidado[col] = hogar_consolidado[col].astype(str)
-                elif col in ['ano4', 'trimestre', 'nro_hogar']:
+                elif col in ['ano4', 'trimestre', 'nro_hogar', 'pobre']:
                     hogar_consolidado[col] = pd.to_numeric(hogar_consolidado[col], errors='coerce').fillna(0).astype('int32')
                 else:
                     hogar_consolidado[col] = pd.to_numeric(hogar_consolidado[col], errors='coerce').astype('float32')
             
-            # ESCRITURA DIRECTA EN DISCO (Streaming)
             table = pa.Table.from_pandas(hogar_consolidado, preserve_index=False)
             if writer is None:
                 OUTPUT_PARQUET.parent.mkdir(parents=True, exist_ok=True)
@@ -324,16 +319,15 @@ def ejecutar_pipeline():
             
             writer.write_table(table)
             total_hogares += len(hogar_consolidado)
-            print(f"✓ Guardado en disco: T{trim} {año} ({len(hogar_consolidado):,} hogares)")
+            print(f"✓ Guardado en disco: T{trim} {año} ({len(hogar_consolidado):,} hogares respondentes)")
             
-            # LIBERACIÓN FORZADA DE MEMORIA
             del df_h, df_i, df_i_agg, hogar_consolidado, table
             gc.collect()
             
     if writer:
         writer.close()
-        print(f"\n¡Éxito! Archivo generado: {OUTPUT_PARQUET.resolve()}")
-        print(f"Total de observaciones (hogares): {total_hogares:,}\n")
+        print(f"\n¡Proceso finalizado! Archivo guardado: {OUTPUT_PARQUET.resolve()}")
+        print(f"Total de hogares respondentes: {total_hogares:,}\n")
 
 if __name__ == "__main__":
     ejecutar_pipeline()
