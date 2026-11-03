@@ -44,6 +44,8 @@ AÑOS = range(2016, 2027)
 TRIMESTRES = range(1, 5)
 
 COLS_TO_DROP = {
+    # Variables de texto abierto / no numéricas
+    "mas_500", "iv1_esp", "iv3_esp", "iv7_esp", "ii7_esp", "ii8_esp",
     # Ingresos individuales y deciles (Target Leakage)
     "p21", "tot_p12", "p47t", "ipcf", "t_vi", "decocur", "rdecocur", "adecocur",
     "gdecocur", "pdecocur", "idecocur", "decinndr", "rdecindr", "gdecindr",
@@ -279,6 +281,10 @@ def ejecutar_pipeline():
             df_i_agg = procesar_agregados_hogar(df_i)
             
             hogar_consolidado = df_h.merge(df_i_agg, on=['codusu', 'nro_hogar'], how='inner')
+            if hogar_consolidado.empty:
+                continue
+
+            hogar_consolidado = hogar_consolidado.dropna(subset=['iv1', 'ii1']).copy()
             if hogar_consolidado.empty:
                 continue
             

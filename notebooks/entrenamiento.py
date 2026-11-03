@@ -1,7 +1,8 @@
 """
 ===============================================================================
 PROYECTO: Modelado de Pobreza con EPH (Machine Learning)
-SCRIPT: Sintonización Bayesiana con W&B y Backtesting Walk-Forward con Purga
+SCRIPT: Sintonización Bayesiana Unificada con W&B y Backtesting Walk-Forward
+ARQUITECTURAS: Logistic Regression, Random Forest, XGBoost y Tabular MLP
 ===============================================================================
 """
 
@@ -14,85 +15,53 @@ import numpy as np
 import pandas as pd
 import wandb
 
+from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import OneHotEncoder, StandardScaler, OrdinalEncoder
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import precision_recall_curve, auc, fbeta_score
+from sklearn.metrics import precision_recall_curve, auc
 import xgboost as xgb
 
 import torch
 import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader
 
 warnings.filterwarnings("ignore")
 
+# 1. Detección y diagnóstico de dispositivo
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-PARQUET_FILE = Path("data/eph_hogares_consolidada_2016_2026.parquet")
+print(f"--- Dispositivo de cómputo seleccionado: {DEVICE.upper()} ---")
+if DEVICE == "cuda":
+    print(f"GPU activa: {torch.cuda.get_device_name(0)}")
+else:
+    print("ADVERTENCIA: GPU no detectada por PyTorch. Corriendo en CPU.")
+
+# Resolución robusta de la ruta del dataset
+PARQUET_FILE = Path("../data/eph_hogares_consolidada_2016_2026.parquet")
+if not PARQUET_FILE.exists():
+    PARQUET_FILE = Path("data/eph_hogares_consolidada_2016_2026.parquet")
 
 # =============================================================================
-# 1. SPLITTER TEMPORAL CON PURGA INTER-PANEL (EPH 2-2-2)
-# =============================================================================
-class PurgedWalkForwardSplitter:
-    def __init__(self, df: pd.DataFrame, train_quarters: int = 8):
-        self.df = df
-        self.train_quarters = train_quarters
-        self.periodos = (
-            df[["ano4", "trimestre"]]
-            .drop_duplicates()
-            .sort_values(by=["ano4", "trimestre"])
-            .values.tolist()
-        )
-
-    def get_folds(self, start_idx: int = 8, end_idx: int = None) -> List[Tuple[np.ndarray, np.ndarray]]:
-        if end_idx is None:
-            end_idx = len(self.periodos)
-
-        folds = []
-        for i in range(start_idx, end_idx):
-            val_ano, val_trim = self.periodos[i]
-            train_window = self.periodos[i - self.train_quarters : i]
-
-            # Máscara para la ventana de entrenamiento (8 trimestres)
-            train_mask = pd.Series(False, index=self.df.index)
-            for a, t in train_window:
-                train_mask |= (self.df["ano4"] == a) & (self.df["trimestre"] == t)
-
-            # Máscara para la ventana de validación/test (1 trimestre)
-            val_mask = (self.df["ano4"] == val_ano) & (self.df["trimestre"] == val_trim)
-
-            # PURGA: Eliminar de train cualquier hogar presente en val
-            hogares_val = set(self.df.loc[val_mask, "codusu"].unique())
-            hogares_train = self.df["codusu"].isin(hogares_val)
-            train_mask_purged = train_mask & (~hogares_train)
-
-            idx_train = np.where(train_mask_purged)[0]
-            idx_val = np.where(val_mask)[0]
-
-            folds.append((idx_train, idx_val))
-        return folds
-
-# =============================================================================
-# 2. EVALUACIÓN Y CALIBRACIÓN DE UMBRAL (F2-SCORE Y PR-AUC)
+# 1. EVALUACIÓN Y CALIBRACIÓN VECTORIZADA DE UMBRAL (F2-SCORE Y PR-AUC)
 # =============================================================================
 def calcular_metricas(y_true: np.ndarray, y_probs: np.ndarray) -> Dict[str, float]:
     precision, recall, thresholds = precision_recall_curve(y_true, y_probs)
     pr_auc = auc(recall, precision)
 
-    # Búsqueda del umbral óptimo empírico que maximiza F2
-    f2_scores = []
-    thresholds_eval = np.linspace(0.1, 0.9, 81)
-    for tau in thresholds_eval:
-        preds = (y_probs >= tau).astype(int)
-        f2_scores.append(fbeta_score(y_true, preds, beta=2, zero_division=0))
+    # Cálculo vectorizado sin bucles: F2 = 5 * (P * R) / (4 * P + R)
+    denominador = (4 * precision + recall)
+    f2_scores = np.divide(
+        5 * (precision * recall),
+        denominador,
+        out=np.zeros_like(precision),
+        where=denominador > 0
+    )
 
     best_idx = np.argmax(f2_scores)
-    best_tau = float(thresholds_eval[best_idx])
     best_f2 = float(f2_scores[best_idx])
-    
-    preds_best = (y_probs >= best_tau).astype(int)
-    recall_opt = float(np.sum((preds_best == 1) & (y_true == 1)) / max(np.sum(y_true == 1), 1))
+    best_tau = float(thresholds[best_idx]) if best_idx < len(thresholds) else 0.5
+    recall_opt = float(recall[best_idx])
 
     return {
         "pr_auc": float(pr_auc),
@@ -102,19 +71,8 @@ def calcular_metricas(y_true: np.ndarray, y_probs: np.ndarray) -> Dict[str, floa
     }
 
 # =============================================================================
-# 3. RED NEURONAL TABULAR (PYTORCH)
+# 2. ARQUITECTURA RED NEURONAL TABULAR (PYTORCH)
 # =============================================================================
-class TabularDataset(Dataset):
-    def __init__(self, X: np.ndarray, y: np.ndarray):
-        self.X = torch.tensor(X, dtype=torch.float32)
-        self.y = torch.tensor(y, dtype=torch.float32).unsqueeze(1)
-
-    def __len__(self):
-        return len(self.y)
-
-    def __getitem__(self, idx):
-        return self.X[idx], self.y[idx]
-
 class TabularMLP(nn.Module):
     def __init__(self, in_features: int, hidden_layers: List[int], dropout: float = 0.2):
         super().__init__()
@@ -140,11 +98,10 @@ def entrenar_evaluar_mlp(
     config: Dict[str, Any]
 ) -> Dict[str, float]:
     
-    train_ds = TabularDataset(X_tr, y_tr)
-    val_ds = TabularDataset(X_va, y_va)
-    
-    train_loader = DataLoader(train_ds, batch_size=config.get("batch_size", 512), shuffle=True)
-    val_loader = DataLoader(val_ds, batch_size=1024, shuffle=False)
+    # Transferencia directa a VRAM (los 110k registros ocupan ~15 MB)
+    X_tr_t = torch.tensor(X_tr, dtype=torch.float32, device=DEVICE)
+    y_tr_t = torch.tensor(y_tr, dtype=torch.float32, device=DEVICE).unsqueeze(1)
+    X_va_t = torch.tensor(X_va, dtype=torch.float32, device=DEVICE)
 
     model = TabularMLP(
         in_features=X_tr.shape[1],
@@ -152,101 +109,142 @@ def entrenar_evaluar_mlp(
         dropout=config.get("dropout", 0.2)
     ).to(DEVICE)
 
-    # Balanceo por pérdida logarítmica ponderada
-    pos_weight = torch.tensor([(len(y_tr) - np.sum(y_tr)) / max(np.sum(y_tr), 1)], dtype=torch.float32).to(DEVICE)
-    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    pos_w = (len(y_tr) - np.sum(y_tr)) / max(np.sum(y_tr), 1)
+    criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([pos_w], dtype=torch.float32, device=DEVICE))
     optimizer = torch.optim.AdamW(
         model.parameters(), 
         lr=config.get("lr", 1e-3), 
         weight_decay=config.get("weight_decay", 1e-4)
     )
 
-    epochs = config.get("epochs", 25)
+    batch_size = config.get("batch_size", 2048)
+    n_samples = X_tr_t.shape[0]
+    epochs = config.get("epochs", 15)
+
+    model.train()
     for _ in range(epochs):
-        model.train()
-        for x_b, y_b in train_loader:
-            x_b, y_b = x_b.to(DEVICE), y_b.to(DEVICE)
-            optimizer.zero_grad()
-            out = model(x_b)
-            loss = criterion(out, y_b)
+        perm = torch.randperm(n_samples, device=DEVICE)
+        for j in range(0, n_samples, batch_size):
+            indices = perm[j : j + batch_size]
+            optimizer.zero_grad(set_to_none=True)
+            out = model(X_tr_t[indices])
+            loss = criterion(out, y_tr_t[indices])
             loss.backward()
             optimizer.step()
 
     model.eval()
-    y_preds_list = []
     with torch.no_grad():
-        for x_b, _ in val_loader:
-            x_b = x_b.to(DEVICE)
-            probs = torch.sigmoid(model(x_b)).cpu().numpy()
-            y_preds_list.append(probs)
+        probs = torch.sigmoid(model(X_va_t)).squeeze(1).cpu().numpy()
 
-    y_probs = np.vstack(y_preds_list).ravel()
-    return calcular_metricas(y_va, y_probs)
+    # Liberación forzada de memoria de video entre folds
+    del model, optimizer, criterion, X_tr_t, y_tr_t, X_va_t
+    if DEVICE == "cuda":
+        torch.cuda.empty_cache()
+
+    return calcular_metricas(y_va, probs)
 
 # =============================================================================
-# 4. PREPROCESADOR DE VARIABLES
+# 3. PREPROCESAMIENTO GLOBAL Y CACHÉ DE PLIEGUES EN MEMORIA
 # =============================================================================
-def construir_preprocesador(df: pd.DataFrame) -> Tuple[ColumnTransformer, List[str]]:
+PREPARED_FOLDS: List[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = []
+
+def cargar_y_preprocesar_folds():
+    global PREPARED_FOLDS
+    if len(PREPARED_FOLDS) > 0:
+        return
+
+    print("\n[Inicialización] Cargando Parquet y preparando folds temporales con purga...")
+    if not PARQUET_FILE.exists():
+        raise FileNotFoundError(f"No se encontró el archivo: {PARQUET_FILE.resolve()}")
+
+    df = pd.read_parquet(PARQUET_FILE)
+    df_dev = df[df["ano4"] <= 2021].reset_index(drop=True)
+
+    periodos = (
+        df_dev[["ano4", "trimestre"]]
+        .drop_duplicates()
+        .sort_values(by=["ano4", "trimestre"])
+        .values.tolist()
+    )
+
     cols_excluir = {"codusu", "nro_hogar", "linea_pobreza", "pobre", "ano4", "trimestre"}
-    todas_cols = [c for c in df.columns if c not in cols_excluir]
+    todas_cols = [c for c in df_dev.columns if c not in cols_excluir]
 
     nominales = [c for c in ["region_estudio", "iv1", "ii7"] if c in todas_cols]
     ordinales = [c for c in ["max_educ_hogar", "jefe_nivel_ed"] if c in todas_cols]
     numericas = [c for c in todas_cols if c not in nominales and c not in ordinales]
 
-    transformers = [
-        ("nom", OneHotEncoder(drop="first", sparse_output=False, handle_unknown="ignore"), nominales),
-        ("ord", OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=-1), ordinales),
-        ("num", StandardScaler(), numericas)
-    ]
-    preprocessor = ColumnTransformer(transformers=transformers, remainder="drop")
-    return preprocessor, todas_cols
+    train_quarters = 8
+    for i in range(train_quarters, len(periodos)):
+        val_ano, val_trim = periodos[i]
+        train_window = periodos[i - train_quarters : i]
+
+        train_mask = pd.Series(False, index=df_dev.index)
+        for a, t in train_window:
+            train_mask |= (df_dev["ano4"] == a) & (df_dev["trimestre"] == t)
+        val_mask = (df_dev["ano4"] == val_ano) & (df_dev["trimestre"] == val_trim)
+
+        # Purga inter-panel (EPH rotativo 2-2-2)
+        hogares_val = set(df_dev.loc[val_mask, "codusu"].unique())
+        train_mask_purged = train_mask & (~df_dev["codusu"].isin(hogares_val))
+
+        train_sub = df_dev[train_mask_purged]
+        val_sub = df_dev[val_mask]
+
+        # Pipeline con imputación robusta contra NaNs
+        preprocessor = ColumnTransformer(transformers=[
+            ("nom", Pipeline([
+                ("imputer", SimpleImputer(strategy="constant", fill_value="Desconocido")),
+                ("encoder", OneHotEncoder(drop="first", sparse_output=False, handle_unknown="ignore"))
+            ]), nominales),
+            ("ord", Pipeline([
+                ("imputer", SimpleImputer(strategy="most_frequent")),
+                ("encoder", OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=-1))
+            ]), ordinales),
+            ("num", Pipeline([
+                ("imputer", SimpleImputer(strategy="median")),
+                ("scaler", StandardScaler())
+            ]), numericas)
+        ], remainder="drop")
+
+        X_tr = preprocessor.fit_transform(train_sub[todas_cols]).astype(np.float32)
+        y_tr = train_sub["pobre"].values.astype(np.int32)
+        X_va = preprocessor.transform(val_sub[todas_cols]).astype(np.float32)
+        y_va = val_sub["pobre"].values.astype(np.int32)
+
+        PREPARED_FOLDS.append((X_tr, y_tr, X_va, y_va))
+
+    del df, df_dev
+    gc.collect()
+    print(f"✓ {len(PREPARED_FOLDS)} pliegues procesados y almacenados en RAM. Listos para sweeps.\n")
 
 # =============================================================================
-# 5. WORKER UNIFICADO DE W&B SWEEPS (FASE DE DESARROLLO 2016-2021)
+# 4. WORKER UNIFICADO DE W&B SWEEPS
 # =============================================================================
 def train_sweep_iteration():
     run = wandb.init()
     cfg = wandb.config
 
-    # Carga puntual de datos
-    df = pd.read_parquet(PARQUET_FILE)
-    
-    # Período de optimización bayesiana: 2016-2021
-    df_dev = df[df["ano4"] <= 2021].reset_index(drop=True)
-    splitter = PurgedWalkForwardSplitter(df_dev, train_quarters=8)
-    folds = splitter.get_folds()
+    # Asegurar que los datos estén cargados en memoria
+    cargar_y_preprocesar_folds()
 
-    preprocessor, feature_names = construir_preprocesador(df_dev)
-    
     pr_aucs, f2s = [], []
 
-    for fold_idx, (idx_tr, idx_va) in enumerate(folds):
-        train_sub = df_dev.iloc[idx_tr]
-        val_sub = df_dev.iloc[idx_va]
-
-        X_train_raw = train_sub[feature_names]
-        y_train = train_sub["pobre"].values
-        X_val_raw = val_sub[feature_names]
-        y_val = val_sub["pobre"].values
-
-        # Ajuste del preprocesamiento exclusivamente sobre el set de train
-        X_train = preprocessor.fit_transform(X_train_raw)
-        X_val = preprocessor.transform(X_val_raw)
-
+    for X_tr, y_tr, X_va, y_va in PREPARED_FOLDS:
         if cfg.model_family == "logistic":
             model = LogisticRegression(
                 C=cfg.C,
-                penalty=cfg.penalty,
-                solver="saga",
+                penalty="l2",
+                solver="lbfgs",
+                tol=1e-3,
                 class_weight="balanced",
-                max_iter=1000,
+                max_iter=500,
                 random_state=42,
                 n_jobs=-1
             )
-            model.fit(X_train, y_train)
-            probs = model.predict_proba(X_val)[:, 1]
-            metrics = calcular_metricas(y_val, probs)
+            model.fit(X_tr, y_tr)
+            probs = model.predict_proba(X_va)[:, 1]
+            metrics = calcular_metricas(y_va, probs)
 
         elif cfg.model_family == "random_forest":
             model = RandomForestClassifier(
@@ -258,12 +256,12 @@ def train_sweep_iteration():
                 random_state=42,
                 n_jobs=-1
             )
-            model.fit(X_train, y_train)
-            probs = model.predict_proba(X_val)[:, 1]
-            metrics = calcular_metricas(y_val, probs)
+            model.fit(X_tr, y_tr)
+            probs = model.predict_proba(X_va)[:, 1]
+            metrics = calcular_metricas(y_va, probs)
 
         elif cfg.model_family == "xgboost":
-            scale_pos = (len(y_train) - np.sum(y_train)) / max(np.sum(y_train), 1)
+            scale_pos = (len(y_tr) - np.sum(y_tr)) / max(np.sum(y_tr), 1)[cite: 4]
             model = xgb.XGBClassifier(
                 tree_method="hist",
                 device=DEVICE,
@@ -277,9 +275,9 @@ def train_sweep_iteration():
                 eval_metric="aucpr",
                 random_state=42
             )
-            model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
-            probs = model.predict_proba(X_val)[:, 1]
-            metrics = calcular_metricas(y_val, probs)
+            model.fit(X_tr, y_tr, eval_set=[(X_va, y_va)], verbose=False)
+            probs = model.predict_proba(X_va)[:, 1]
+            metrics = calcular_metricas(y_va, probs)
 
         elif cfg.model_family == "mlp":
             config_mlp = {
@@ -287,23 +285,23 @@ def train_sweep_iteration():
                 "dropout": cfg.dropout,
                 "lr": cfg.lr,
                 "weight_decay": cfg.weight_decay,
-                "batch_size": 512,
-                "epochs": 25
+                "batch_size": 2048,
+                "epochs": 15
             }
-            metrics = entrenar_evaluar_mlp(X_train, y_train, X_val, y_val, config_mlp)
+            metrics = entrenar_evaluar_mlp(X_tr, y_tr, X_va, y_va, config_mlp)
 
         pr_aucs.append(metrics["pr_auc"])
         f2s.append(metrics["f2_score"])
 
-    # Logueo del promedio sobre los folds del período de desarrollo
+    # Logueo del promedio de métricas sobre los 14 folds
     wandb.log({
-        "mean_pr_auc": np.mean(pr_aucs),
-        "mean_f2_score": np.mean(f2s)
+        "mean_pr_auc": float(np.mean(pr_aucs)),
+        "mean_f2_score": float(np.mean(f2s))
     })
     run.finish()
 
 # =============================================================================
-# 6. CONFIGURACIONES DE SWEEP POR MODELO
+# 5. CONFIGURACIONES DE SWEEPS BAYESIANOS POR MODELO
 # =============================================================================
 SWEEP_CONFIGS = {
     "logistic": {
@@ -311,8 +309,7 @@ SWEEP_CONFIGS = {
         "metric": {"name": "mean_pr_auc", "goal": "maximize"},
         "parameters": {
             "model_family": {"value": "logistic"},
-            "C": {"distribution": "log_uniform_values", "min": 1e-4, "max": 100.0},
-            "penalty": {"values": ["l1", "l2"]}
+            "C": {"distribution": "log_uniform_values", "min": 1e-4, "max": 100.0}
         }
     },
     "random_forest": {
@@ -351,7 +348,7 @@ SWEEP_CONFIGS = {
 }
 
 # =============================================================================
-# 7. EJECUCIÓN DEL PIPELINE COMPLETO
+# 6. ENTRADA PRINCIPAL
 # =============================================================================
 if __name__ == "__main__":
     import argparse
@@ -361,8 +358,11 @@ if __name__ == "__main__":
     parser.add_argument("--count", type=int, default=30, help="Cantidad de iteraciones bayesianas")
     args = parser.parse_args()
 
+    # Preprocesar los 14 folds en RAM antes de iniciar el agente
+    cargar_y_preprocesar_folds()
+
     sweep_config = SWEEP_CONFIGS[args.model]
     sweep_id = wandb.sweep(sweep_config, project=args.project)
-    print(f"\nIniciando Sweep Bayesiano en W&B para {args.model.upper()}. Sweep ID: {sweep_id}")
+    print(f"Iniciando Sweep Bayesiano en W&B para {args.model.upper()}. Sweep ID: {sweep_id}")
     
     wandb.agent(sweep_id, function=train_sweep_iteration, count=args.count)
