@@ -45,7 +45,7 @@ TRIMESTRES = range(1, 5)
 
 COLS_TO_DROP = {
     # 1. Ponderadores muestrales (Target Leakage crítico)
-    "pondera", "pondih", "pondiio", "pondii",
+    "pondera", "pondiio", "pondii",
     
     # 2. Ingresos individuales directos y deciles (Target Leakage)
     "p21", "tot_p12", "p47t", "ipcf", "t_vi", "decocur", "rdecocur", "adecocur",
