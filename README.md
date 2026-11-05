@@ -8,3 +8,7 @@
 4. guardar el csv en la carpeta data
 5. Ejecutar descarga.ipynb
 6. Ejecutar limpieza.ipynb
+
+
+
+python entrenamiento.py --model random_forest --count 25

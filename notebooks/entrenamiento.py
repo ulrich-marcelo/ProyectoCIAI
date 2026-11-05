@@ -6,8 +6,25 @@ ARQUITECTURAS: Logistic Regression, Random Forest, XGBoost y Tabular MLP
 ===============================================================================
 """
 
+# 1. IMPORTACIÓN PRIORITARIA DE PYTORCH (Evita colisiones de DLLs en Windows)
+import torch
+import torch.nn as nn
+
 import os
-# Prevención de deadlocks e interferencia de hilos OpenMP/MKL en Windows
+import sys
+
+# Diagnóstico de entorno y hardware
+print("=" * 70)
+print(f"Intérprete Python en uso: {sys.executable}")
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+print(f"Dispositivo de cómputo para PyTorch: {DEVICE.upper()}")
+if DEVICE == "cuda":
+    print(f"GPU activa: {torch.cuda.get_device_name(0)}")
+else:
+    print("ADVERTENCIA: PyTorch sigue sin detectar GPU. Verificá tu entorno.")
+print("=" * 70 + "\n")
+
+# Configuración de hilos para CPU
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
 
@@ -31,18 +48,7 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import precision_recall_curve, auc, roc_auc_score, brier_score_loss
 import xgboost as xgb
 
-import torch
-import torch.nn as nn
-
 warnings.filterwarnings("ignore")
-
-# 1. Configuración de hardware
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-print(f"\n--- Dispositivo de cómputo seleccionado: {DEVICE.upper()} ---")
-if DEVICE == "cuda":
-    print(f"GPU activa: {torch.cuda.get_device_name(0)}\n")
-else:
-    print("ADVERTENCIA: GPU no detectada por PyTorch. Corriendo en CPU.\n")
 
 PARQUET_FILE = Path("data/eph_hogares_consolidada_2016_2026.parquet")
 if not PARQUET_FILE.exists():
@@ -56,7 +62,6 @@ def calcular_metricas(y_true: np.ndarray, y_probs: np.ndarray) -> Dict[str, floa
     pr_auc = auc(recall, precision)
     roc_auc = roc_auc_score(y_true, y_probs)
 
-    # Cálculo vectorizado de F2-Score: pondera el Recall el doble que la Precisión
     denominador = (4 * precision + recall)
     f2_scores = np.divide(
         5 * (precision * recall),
@@ -69,7 +74,6 @@ def calcular_metricas(y_true: np.ndarray, y_probs: np.ndarray) -> Dict[str, floa
     best_f2 = float(f2_scores[best_idx])
     best_tau = float(thresholds[best_idx]) if best_idx < len(thresholds) else 0.5
 
-    # Métricas evaluadas en el punto de corte óptimo tau*
     y_pred = (y_probs >= best_tau).astype(int)
     tp = np.sum((y_pred == 1) & (y_true == 1))
     fp = np.sum((y_pred == 1) & (y_true == 0))
@@ -81,7 +85,6 @@ def calcular_metricas(y_true: np.ndarray, y_probs: np.ndarray) -> Dict[str, floa
     especificidad_opt = float(tn / (tn + fp)) if (tn + fp) > 0 else 0.0
     f1_opt = float(2 * (precision_opt * recall_opt) / (precision_opt + recall_opt)) if (precision_opt + recall_opt) > 0 else 0.0
 
-    # Calibración probabilística
     brier = float(brier_score_loss(y_true, y_probs))
     eps = 1e-7
     y_probs_clip = np.clip(y_probs, eps, 1.0 - eps)
@@ -128,7 +131,6 @@ def entrenar_evaluar_mlp(
     config: Dict[str, Any]
 ) -> Tuple[Dict[str, float], Dict[str, float]]:
     
-    # Carga directa en memoria VRAM
     X_tr_t = torch.tensor(X_tr, dtype=torch.float32, device=DEVICE)
     y_tr_t = torch.tensor(y_tr, dtype=torch.float32, device=DEVICE).unsqueeze(1)
     X_va_t = torch.tensor(X_va, dtype=torch.float32, device=DEVICE)
@@ -174,7 +176,34 @@ def entrenar_evaluar_mlp(
     return calcular_metricas(y_tr, probs_tr), calcular_metricas(y_va, probs_va)
 
 # =============================================================================
-# 3. AISLAMIENTO DE FEATURES Y VERIFICACIÓN ESTRICTA DE NaNs
+# 3. CONSTRUCTOR ROBUSTO PARA XGBOOST (COMPATIBLE CON VERSIONES 1.X Y 2.X)
+# =============================================================================
+def construir_modelo_xgboost(cfg: Any, scale_pos: float) -> xgb.XGBClassifier:
+    xgb_major_ver = int(xgb.__version__.split(".")[0])
+    
+    params = {
+        "n_estimators": 400,
+        "learning_rate": cfg.learning_rate,
+        "max_depth": cfg.max_depth,
+        "subsample": cfg.subsample,
+        "colsample_bytree": cfg.colsample_bytree,
+        "scale_pos_weight": scale_pos * cfg.scale_pos_factor,
+        "early_stopping_rounds": 30,
+        "eval_metric": "aucpr",
+        "random_state": 42
+    }
+
+    # XGBoost 2.0+ usa device="cuda"/"cpu". XGBoost 1.x usa tree_method="gpu_hist"/"hist"
+    if xgb_major_ver >= 2:
+        params["tree_method"] = "hist"
+        params["device"] = DEVICE
+    else:
+        params["tree_method"] = "gpu_hist" if DEVICE == "cuda" else "hist"
+
+    return xgb.XGBClassifier(**params)
+
+# =============================================================================
+# 4. AISLAMIENTO DE FEATURES Y VERIFICACIÓN ESTRICTA DE NaNs
 # =============================================================================
 PREPARED_FOLDS: List[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = []
 
@@ -190,17 +219,8 @@ def cargar_y_preprocesar_folds():
     df = pd.read_parquet(PARQUET_FILE)
     df_dev = df[df["ano4"] <= 2021].reset_index(drop=True)
 
-    # -------------------------------------------------------------------------
-    # COLUMNAS DE PROCESAMIENTO QUE NO DEBEN SER FEATURES PREDICTORAS
-    # -------------------------------------------------------------------------
     cols_excluir = {
-        # Metadatos e identificadores de panel / purga
-        "codusu", "nro_hogar",
-        # Variables de tiempo utilizadas para el particionado temporal
-        "ano4", "trimestre",
-        # Target y umbral monetario analítico
-        "pobre", "linea_pobreza",
-        # Salvaguarda: exclusión de ponderadores y módulos no estructurales
+        "codusu", "nro_hogar", "ano4", "trimestre", "pobre", "linea_pobreza",
         "pondera", "pondih", "pondiio", "pondii",
         "v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9", "v10", "v11", 
         "v12", "v13", "v14", "v15", "v16", "v17", "v18", "v19_a", "v19_b", "v19_am", "v21", "v22",
@@ -208,12 +228,9 @@ def cargar_y_preprocesar_folds():
         "ix_tot", "ix_men10", "ix_mayeq10"
     }
 
-    # Espacio de features predictoras puras
     todas_cols = [c for c in df_dev.columns if c not in cols_excluir]
 
-    # -------------------------------------------------------------------------
-    # FRENO DE EMERGENCIA POR NaNs / NAs (PROHIBICIÓN DE IMPUTACIÓN)
-    # -------------------------------------------------------------------------
+    # Freno estricto si hay nulos en las variables predictoras
     nans_totales = df_dev[todas_cols].isna().sum()
     cols_con_nan = nans_totales[nans_totales > 0]
     if not cols_con_nan.empty:
@@ -222,7 +239,7 @@ def cargar_y_preprocesar_folds():
             f"\n\n{'!'*70}\n"
             f"¡FRENO DE EMERGENCIA! El dataset contiene valores NaN/NA y la imputación está prohibida.\n"
             f"Columnas predictoras con faltantes:\n{detalle}\n"
-            f"Ejecutá limpieza.py para sanear la base antes de iniciar el entrenamiento.\n"
+            f"Ejecutá limpieza.py para sanear la base antes de reanudar el entrenamiento.\n"
             f"{'!'*70}\n"
         )
 
@@ -247,14 +264,12 @@ def cargar_y_preprocesar_folds():
             train_mask |= (df_dev["ano4"] == a) & (df_dev["trimestre"] == t)
         val_mask = (df_dev["ano4"] == val_ano) & (df_dev["trimestre"] == val_trim)
 
-        # Purga inter-panel: exclusión de hogares solapados en test
         hogares_val = set(df_dev.loc[val_mask, "codusu"].unique())
         train_mask_purged = train_mask & (~df_dev["codusu"].isin(hogares_val))
 
         train_sub = df_dev[train_mask_purged]
         val_sub = df_dev[val_mask]
 
-        # Preprocesamiento sin imputación
         preprocessor = ColumnTransformer(transformers=[
             ("nom", OneHotEncoder(drop="first", sparse_output=False, handle_unknown="ignore"), nominales),
             ("ord", OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=-1), ordinales),
@@ -267,7 +282,7 @@ def cargar_y_preprocesar_folds():
         y_va = val_sub["pobre"].values.astype(np.int32)
 
         if np.isnan(X_tr).any() or np.isnan(X_va).any():
-            raise ValueError("¡FRENO DE EMERGENCIA! Se generaron valores NaNs durante la transformación numérica.")
+            raise ValueError("¡FRENO DE EMERGENCIA! Se generaron NaNs durante el preprocesamiento numérico.")
 
         PREPARED_FOLDS.append((X_tr, y_tr, X_va, y_va))
 
@@ -276,7 +291,7 @@ def cargar_y_preprocesar_folds():
     print(f"✓ {len(PREPARED_FOLDS)} pliegues procesados sin NaNs y retenidos en RAM ({len(todas_cols)} features predictoras).\n")
 
 # =============================================================================
-# 4. WORKER UNIFICADO DE W&B SWEEPS
+# 5. WORKER UNIFICADO DE W&B SWEEPS
 # =============================================================================
 def train_sweep_iteration():
     run = wandb.init()
@@ -307,27 +322,34 @@ def train_sweep_iteration():
 
         elif cfg.model_family == "random_forest":
             num_cpus = max(1, os.cpu_count() - 2) if os.cpu_count() else 4
+
+            # Resguardo: si es numérico se pasa como float, si es 'sqrt' se preserva como str
+            max_feat = cfg.max_features
+            try:
+                max_feat = float(max_feat)
+            except (ValueError, TypeError):
+                max_feat = str(max_feat)
+
             model = RandomForestClassifier(
                 n_estimators=200,
-                max_depth=cfg.max_depth,
-                min_samples_leaf=cfg.min_samples_leaf,
-                max_features=cfg.max_features,
+                max_depth=int(cfg.max_depth),
+                min_samples_leaf=int(cfg.min_samples_leaf),
+                max_features=max_feat,
                 class_weight="balanced",
                 random_state=42
             )
-            # Backend por subhilos para evitar deadlocks de memoria compartida en Windows
             with parallel_backend('threading', n_jobs=num_cpus):
                 model.fit(X_tr, y_tr)
                 probs_tr = model.predict_proba(X_tr)[:, 1]
                 probs_va = model.predict_proba(X_va)[:, 1]
             m_tr = calcular_metricas(y_tr, probs_tr)
             m_va = calcular_metricas(y_va, probs_va)
-
+            
         elif cfg.model_family == "xgboost":
             scale_pos = (len(y_tr) - np.sum(y_tr)) / max(np.sum(y_tr), 1)
             model = xgb.XGBClassifier(
-                tree_method="hist",
-                device=DEVICE,
+                tree_method="gpu_hist",
+                gpu_id=0,
                 n_estimators=400,
                 learning_rate=cfg.learning_rate,
                 max_depth=cfg.max_depth,
@@ -358,37 +380,29 @@ def train_sweep_iteration():
         train_metrics_list.append(m_tr)
         val_metrics_list.append(m_va)
 
-    # Limpieza forzada de subprocesos
     if cfg.model_family == "random_forest":
         get_reusable_executor().shutdown(wait=True)
     gc.collect()
 
-    # Logueo exhaustivo en Weights & Biases
     wandb.log({
-        # PR-AUC
         "val_mean_pr_auc": float(np.mean([m["pr_auc"] for m in val_metrics_list])),
         "train_mean_pr_auc": float(np.mean([m["pr_auc"] for m in train_metrics_list])),
-        # ROC-AUC
         "val_mean_roc_auc": float(np.mean([m["roc_auc"] for m in val_metrics_list])),
         "train_mean_roc_auc": float(np.mean([m["roc_auc"] for m in train_metrics_list])),
-        # F2-Score y F1-Score
         "val_mean_f2_score": float(np.mean([m["f2_score"] for m in val_metrics_list])),
         "train_mean_f2_score": float(np.mean([m["f2_score"] for m in train_metrics_list])),
         "val_mean_f1_score": float(np.mean([m["f1_score"] for m in val_metrics_list])),
         "train_mean_f1_score": float(np.mean([m["f1_score"] for m in train_metrics_list])),
-        # Métricas operativas en corte óptimo tau*
         "val_mean_recall": float(np.mean([m["recall"] for m in val_metrics_list])),
         "train_mean_recall": float(np.mean([m["recall"] for m in train_metrics_list])),
         "val_mean_precision": float(np.mean([m["precision"] for m in val_metrics_list])),
         "train_mean_precision": float(np.mean([m["precision"] for m in train_metrics_list])),
         "val_mean_especificidad": float(np.mean([m["especificidad"] for m in val_metrics_list])),
         "train_mean_especificidad": float(np.mean([m["especificidad"] for m in train_metrics_list])),
-        # Calibración y entropía
         "val_mean_brier_score": float(np.mean([m["brier_score"] for m in val_metrics_list])),
         "train_mean_brier_score": float(np.mean([m["brier_score"] for m in train_metrics_list])),
         "val_mean_log_loss": float(np.mean([m["log_loss"] for m in val_metrics_list])),
         "train_mean_log_loss": float(np.mean([m["log_loss"] for m in train_metrics_list])),
-        # Umbral promedio y diagnóstico de sobreajuste
         "mean_optimal_threshold": float(np.mean([m["optimal_threshold"] for m in val_metrics_list])),
         "gap_pr_auc": float(np.mean([m["pr_auc"] for m in train_metrics_list]) - np.mean([m["pr_auc"] for m in val_metrics_list])),
         "gap_f2_score": float(np.mean([m["f2_score"] for m in train_metrics_list]) - np.mean([m["f2_score"] for m in val_metrics_list]))
@@ -396,7 +410,7 @@ def train_sweep_iteration():
     run.finish()
 
 # =============================================================================
-# 5. CONFIGURACIONES DE SWEEPS BAYESIANOS
+# 6. CONFIGURACIONES DE SWEEPS BAYESIANOS
 # =============================================================================
 SWEEP_CONFIGS = {
     "logistic": {
@@ -412,9 +426,11 @@ SWEEP_CONFIGS = {
         "metric": {"name": "val_mean_pr_auc", "goal": "maximize"},
         "parameters": {
             "model_family": {"value": "random_forest"},
-            "max_depth": {"values": [8, 12, 16, 20]},
-            "min_samples_leaf": {"values": [5, 10, 20, 30]},
-            "max_features": {"values": ["sqrt", 0.3, 0.5]}
+            # Distribuciones enteras para dar densidad al estimador bayesiano
+            "max_depth": {"distribution": "int_uniform", "min": 6, "max": 22},
+            "min_samples_leaf": {"distribution": "int_uniform", "min": 4, "max": 35},
+            # max_features queda como el único parámetro categórico
+            "max_features": {"values": ["sqrt", 0.25, 0.4, 0.55]}
         }
     },
     "xgboost": {
@@ -443,7 +459,7 @@ SWEEP_CONFIGS = {
 }
 
 # =============================================================================
-# 6. ENTRADA PRINCIPAL
+# 7. ENTRADA PRINCIPAL
 # =============================================================================
 if __name__ == "__main__":
     import argparse
@@ -453,7 +469,6 @@ if __name__ == "__main__":
     parser.add_argument("--count", type=int, default=30, help="Cantidad de iteraciones bayesianas")
     args = parser.parse_args()
 
-    # Carga de datos y verificación de ausencia de NaNs
     cargar_y_preprocesar_folds()
 
     sweep_config = SWEEP_CONFIGS[args.model]

@@ -1,6 +1,14 @@
-import torch
-print("¿CUDA disponible en PyTorch?:", torch.cuda.is_available())
-if torch.cuda.is_available():
-    print("Dispositivo detectado:", torch.cuda.get_device_name(0))
-else:
-    print("ALERTA: PyTorch está corriendo en CPU.")
+import xgboost as xgb
+import numpy as np
+
+X = np.random.randn(100, 10)
+y = np.random.randint(0, 2, 100)
+dtrain = xgb.DMatrix(X, label=y)
+
+params = {
+    'tree_method': 'gpu_hist',
+    'gpu_id': 0
+}
+
+bst = xgb.train(params, dtrain, num_boost_round=5)
+print("¡XGBoost está entrenando en la GPU con CUDA 11!")

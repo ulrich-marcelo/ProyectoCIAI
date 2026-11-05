@@ -22,16 +22,14 @@ def auditar_pobreza_hogares(parquet_path: str = "data/eph_hogares_consolidada_20
     if not path.exists():
         raise FileNotFoundError(f"No se encontró el archivo: {path.resolve()}")
 
-    df = pd.read_parquet(path, columns=['ano4', 'trimestre', 'pondih', 'pobre'])
+    df = pd.read_parquet(path, columns=['ano4', 'trimestre', 'pobre'])
     validos = df.dropna(subset=['pobre']).copy()
-    validos = validos[validos['pondih'] > 0]
     validos['semestre'] = np.where(validos['trimestre'].isin([1, 2]), 1, 2)
 
     registros = []
     for (ano, sem), subdf in validos.groupby(['ano4', 'semestre']):
         periodo = f"{ano}-S{sem}"
-        w = subdf['pondih'].values
-        tasa_calculada = np.average(subdf['pobre'], weights=w) * 100
+        tasa_calculada = np.average(subdf['pobre']) * 100
         indec_val = INDEC_HOGARES_OFICIAL.get(periodo, np.nan)
         dif = tasa_calculada - indec_val if not np.isnan(indec_val) else np.nan
 
