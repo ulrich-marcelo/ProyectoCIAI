@@ -5,11 +5,11 @@ AUTOR: Marcelo Gabriel Ulrich | Licenciatura en Ciencia de Datos - UNSAM
 DIRECTORES: César Germán Santamaría | Agustín Moro
 ===============================================================================
 Script de consolidación a nivel HOGAR con escritura incremental en Parquet.
-Incluye:
-- Exclusión metodológica del 2T 2020 (ASPO)
-- Filtrado estricto de respondentes (ITF > 0)
-- Separación de GBA en CABA y Conurbano (7 regiones)
-- Supresión de enfoque "Hogar Tipo 2"
+- Exclusión metodológica del 2T 2020 (ASPO).
+- Filtrado estricto de respondentes (ITF > 0).
+- Separación regional en 7 zonas (CABA, Conurbano y 5 regiones INDEC).
+- Supresión total de ponderadores, Módulo V (sustento/transferencias) y Módulo VII.
+- Depuración estricta: archivo resultante 100% libre de NaNs.
 """
 
 import os
@@ -33,7 +33,7 @@ if hasattr(xlrd, 'open_workbook'):
     xlrd.open_workbook.__defaults__ = tuple(defaults)
 
 # =============================================================================
-# 1. PARÁMETROS Y RUTAS
+# 1. PARÁMETROS Y LISTA DE EXCLUSIÓN TOTAL
 # =============================================================================
 BASE_DIR = Path.cwd()
 DATA_DIR = Path("data/eph raw/")
@@ -44,27 +44,42 @@ AÑOS = range(2016, 2027)
 TRIMESTRES = range(1, 5)
 
 COLS_TO_DROP = {
-    # Variables de texto abierto / no numéricas
-    "mas_500", "iv1_esp", "iv3_esp", "iv7_esp", "ii7_esp", "ii8_esp",
-    # Ingresos individuales y deciles (Target Leakage)
+    # 1. Ponderadores muestrales (Target Leakage crítico)
+    "pondera", "pondih", "pondiio", "pondii",
+    
+    # 2. Ingresos individuales directos y deciles (Target Leakage)
     "p21", "tot_p12", "p47t", "ipcf", "t_vi", "decocur", "rdecocur", "adecocur",
     "gdecocur", "pdecocur", "idecocur", "decinndr", "rdecindr", "gdecindr",
     "pdecindr", "idecindr", "adecindr", "decifr", "idecifr", "rdecifr", "gdecifr",
     "pdecifr", "adecifr", "deccfr", "ideccfr", "rdeccfr", "gdeccfr", "pdeccfr",
     "adeccfr", "p_deccf", "p_rdeccf", "p_gdeccf", "p_pdeccf", "p_ideccf", "p_adeccf",
-    "pondiio", "pondii",
-    # Montos de ingresos no laborales
-    "v2_m", "v3_m", "v4_m", "v5_m", "v8_m", "v9_m", "v10_m", "v11_m", "v12_m",
-    "v18_m", "v19_am", "v21_m", "v2_01_m", "v2_02_m", "v2_03_m", "v5_01_m",
-    "v5_02_m", "v5_03_m", "v11_01_m", "v11_02_m", "v21_01_m", "v21_02_m",
+    
+    # 3. Módulo V completo: Banderas de sustento, transferencias y montos
+    "v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9", "v10", "v11", "v12", 
+    "v13", "v14", "v15", "v16", "v17", "v18", "v19_a", "v19_b", "v19_am", "v21", "v22",
+    "v2_01", "v2_02", "v2_03", "v5_01", "v5_02", "v5_03", "v11_01", "v11_02", 
+    "v21_01", "v21_02", "v21_03", "v22_01", "v22_02", "v22_03",
+    "v1_m", "v2_m", "v3_m", "v4_m", "v5_m", "v8_m", "v9_m", "v10_m", "v11_m", 
+    "v12_m", "v18_m", "v21_m", "v2_01_m", "v2_02_m", "v2_03_m", "v5_01_m", 
+    "v5_02_m", "v5_03_m", "v11_01_m", "v11_02_m", "v21_01_m", "v21_02_m", 
     "v21_03_m", "v22_01_m", "v22_02_m", "v22_03_m",
-    # Variables operativas o muy granulares
-    "realizada", "h15", "imputa", "pp04b_cod", "pp04d_cod", "pp11b_cod", "pp11d_cod",
+
+    # 4. Módulo VII: Privación alimentaria y estrategias de consumo coyuntural
+    "vii1_1", "vii1_2", "vii2_1", "vii2_2", "vii2_3", "vii2_4",
+
+    # 5. Módulo IX redundante
+    "ix_tot", "ix_men10", "ix_mayeq10",
+
+    # 6. Variables de texto abierto y operativas
+    "mas_500", "iv1_esp", "iv3_esp", "iv7_esp", "ii7_esp", "ii8_esp", 
+    "pp09a_esp", "pp09c_esp", "realizada", "h15", "imputa", "cba", "indigencia",
+    "pp04b_cod", "pp04d_cod", "pp11b_cod", "pp11d_cod",
     "pp04b3_mes", "pp04b3_ano", "pp04b3_dia", "pp05b2_mes", "pp05b2_ano", "pp05b2_dia",
-    "pp11b2_mes", "pp11b2_ano", "pp11b2_dia", "pp11g_ano", "pp11g_mes", "pp11g_dia",
-    "ch05", "ch15_cod", "ch16_cod", "pp08d1", "pp08d4", "pp08f1", "pp08f2",
-    "pp08j1", "pp08j2", "pp08j3", "pp09a_esp", "pp09c_esp",
-    # Discontinuadas o no compatibles entre ondas
+    "pp06c", "pp06d", "pp11b2_mes", "pp11b2_ano", "pp11b2_dia", "pp11g_ano", 
+    "pp11g_mes", "pp11g_dia", "ch05", "ch15_cod", "ch16_cod",
+    "pp08d1", "pp08d4", "pp08f1", "pp08f2", "pp08j1", "pp08j2", "pp08j3",
+    "pp09a", "pp09b", "pp09c", "pp02c1", "pp02c2", "pp02c3", "pp02c4", 
+    "pp02c5", "pp02c6", "pp02c7", "pp02c8",
     "cat_inac", "empleo", "sector", "pp02a", "pp02b", "pp02d", "pp02f", "pp02g", 
     "pp03k", "pp04a1", "pp05b3", "pp05i", "pp05j", "pp05k", "pp06e1", "pp06k", 
     "pp06k_sem", "pp06k_mes", "pp06l", "pp07f1_1", "pp07f1_2", "pp07f1_3", 
@@ -109,34 +124,7 @@ def calcular_adulto_equivalente(df_i: pd.DataFrame) -> pd.DataFrame:
     return df_i.assign(adequi=adequi)
 
 # =============================================================================
-# 3. ARMONIZACIÓN DE VARIABLES DE VIVIENDA
-# =============================================================================
-def reconstruir_variables_vivienda(df_h: pd.DataFrame) -> pd.DataFrame:
-    df_h = df_h.copy()
-    mapeo = {
-        'v2':  ['v2_01', 'v2_02', 'v2_03'],
-        'v5':  ['v5_01', 'v5_02', 'v5_03'],
-        'v11': ['v11_01', 'v11_02'],
-        'v21': ['v21_01', 'v21_02', 'v21_03'],
-        'v22': ['v22_01', 'v22_02', 'v22_03']
-    }
-    
-    for var_madre, subvars in mapeo.items():
-        presentes = [s for s in subvars if s in df_h.columns]
-        if presentes:
-            es_si = (df_h[presentes] == 1).any(axis=1)
-            es_no = (df_h[presentes].isin([0, 2])).all(axis=1)
-            
-            if var_madre not in df_h.columns:
-                df_h[var_madre] = np.nan
-                
-            df_h.loc[df_h[var_madre].isna() & es_si, var_madre] = 1
-            df_h.loc[df_h[var_madre].isna() & es_no, var_madre] = 2
-            
-    return df_h
-
-# =============================================================================
-# 4. AGREGACIÓN VECTORIZADA (INDIVIDUO -> HOGAR)
+# 3. AGREGACIÓN VECTORIZADA (INDIVIDUO -> HOGAR)
 # =============================================================================
 def procesar_agregados_hogar(df_i: pd.DataFrame) -> pd.DataFrame:
     df_i = calcular_adulto_equivalente(df_i)
@@ -191,10 +179,10 @@ def procesar_agregados_hogar(df_i: pd.DataFrame) -> pd.DataFrame:
     return hogar_agg.merge(jefes_features, on=['codusu', 'nro_hogar'], how='left')
 
 # =============================================================================
-# 5. PIPELINE PRINCIPAL: STREAMING INCREMENTAL A PARQUET
+# 4. PIPELINE PRINCIPAL: STREAMING INCREMENTAL A PARQUET
 # =============================================================================
 def ejecutar_pipeline():
-    print("--- INICIANDO PIPELINE (7 REGIONES, SIN 2T2020 Y SOLO RESPONDENTES) ---")
+    print("--- INICIANDO PIPELINE DE CONSOLIDACIÓN (ESTRUCTURAL PURO, CERO NaNs) ---")
     
     if not CBT_FILE.exists():
         raise FileNotFoundError(f"No se encontró el archivo: {CBT_FILE}")
@@ -216,7 +204,7 @@ def ejecutar_pipeline():
     for año in AÑOS:
         año_corto = str(año)[-2:]
         for trim in TRIMESTRES:
-            # Exclusión de 1T 2016 (emergencia estadística) y 2T 2020 (ASPO)
+            # Exclusión de 1T 2016 (emergencia estadística) y 2T 2020 (quiebre ASPO)
             if (año == 2016 and trim == 1) or (año == 2020 and trim == 2):
                 continue
                 
@@ -246,7 +234,7 @@ def ejecutar_pipeline():
             df_h['nro_hogar'] = pd.to_numeric(df_h['nro_hogar'], errors='coerce').fillna(1).astype(int)
             df_i['nro_hogar'] = pd.to_numeric(df_i['nro_hogar'], errors='coerce').fillna(1).astype(int)
             
-            # Filtro de respondentes de ingresos
+            # FILTRO ESTRICTO: Solo respondentes con ITF > 0
             if 'itf' not in df_h.columns:
                 print(f"[ALERTA] Columna 'itf' ausente en T{trim} {año}. Se omite.")
                 continue
@@ -256,7 +244,7 @@ def ejecutar_pipeline():
             if df_h.empty:
                 continue
             
-            # Partición regional: CABA vs Conurbano vs Resto de Regiones
+            # PARTICIÓN REGIONAL EN 7 ZONAS
             df_h['aglomerado'] = pd.to_numeric(df_h.get('aglomerado', np.nan), errors='coerce')
             df_h['region'] = pd.to_numeric(df_h.get('region', np.nan), errors='coerce')
 
@@ -276,28 +264,21 @@ def ejecutar_pipeline():
             df_h['region_estudio'] = np.select(conds_region, choices_region, default='Otro')
             df_h = df_h.drop(columns=[col for col in ['aglomerado', 'region'] if col in df_h.columns])
             
-            # Reconstrucción de vivienda y procesamiento individual
-            df_h = reconstruir_variables_vivienda(df_h)
             df_i_agg = procesar_agregados_hogar(df_i)
-            
             hogar_consolidado = df_h.merge(df_i_agg, on=['codusu', 'nro_hogar'], how='inner')
             if hogar_consolidado.empty:
                 continue
-
-            hogar_consolidado = hogar_consolidado.dropna(subset=['iv1', 'ii1']).copy()
-            if hogar_consolidado.empty:
-                continue
             
-            # Variables de hacinamiento
+            # Ratios habitacionales
             habitaciones = pd.to_numeric(hogar_consolidado.get('ii1', np.nan), errors='coerce').fillna(1)
             hogar_consolidado['personas_por_cuarto'] = hogar_consolidado['cant_miembros'] / np.maximum(habitaciones, 1)
             hogar_consolidado['hacinamiento_critico'] = (hogar_consolidado['personas_por_cuarto'] > 3).astype(float)
             
-            # Target oficial INDEC
+            # TARGET OFICIAL INDEC
             hogar_consolidado['linea_pobreza'] = (cbt_valor * hogar_consolidado['adequi_hogar']).astype('float32')
             hogar_consolidado['pobre'] = (hogar_consolidado['itf'] < hogar_consolidado['linea_pobreza']).astype('int32')
             
-            # Eliminación de ITF para evitar filtración (leakage)
+            # Eliminación de ITF post-etiquetado
             hogar_consolidado = hogar_consolidado.drop(columns=['itf'])
 
             if 'ano4' not in hogar_consolidado.columns:
@@ -305,6 +286,7 @@ def ejecutar_pipeline():
             if 'trimestre' not in hogar_consolidado.columns:
                 hogar_consolidado['trimestre'] = trim
                 
+            # Homogeneización de tipos de datos
             if columnas_fijas is None:
                 columnas_fijas = list(hogar_consolidado.columns)
             else:
@@ -318,6 +300,14 @@ def ejecutar_pipeline():
                 else:
                     hogar_consolidado[col] = pd.to_numeric(hogar_consolidado[col], errors='coerce').astype('float32')
             
+            # DEPURACIÓN ESTRICTA: Eliminación de filas con datos incompletos
+            hogar_consolidado = hogar_consolidado.dropna().reset_index(drop=True)
+            if hogar_consolidado.empty:
+                continue
+
+            # Control de calidad previo al guardado
+            assert hogar_consolidado.isna().sum().sum() == 0, f"Error: Se detectaron NaNs en T{trim} {año}"
+
             table = pa.Table.from_pandas(hogar_consolidado, preserve_index=False)
             if writer is None:
                 OUTPUT_PARQUET.parent.mkdir(parents=True, exist_ok=True)
@@ -325,7 +315,7 @@ def ejecutar_pipeline():
             
             writer.write_table(table)
             total_hogares += len(hogar_consolidado)
-            print(f"✓ Guardado en disco: T{trim} {año} ({len(hogar_consolidado):,} hogares respondentes)")
+            print(f"✓ Guardado: T{trim} {año} ({len(hogar_consolidado):,} hogares respondentes sin NaNs)")
             
             del df_h, df_i, df_i_agg, hogar_consolidado, table
             gc.collect()
@@ -333,7 +323,7 @@ def ejecutar_pipeline():
     if writer:
         writer.close()
         print(f"\n¡Proceso finalizado! Archivo guardado: {OUTPUT_PARQUET.resolve()}")
-        print(f"Total de hogares respondentes: {total_hogares:,}\n")
+        print(f"Total de observaciones consolidadas: {total_hogares:,}\n")
 
 if __name__ == "__main__":
     ejecutar_pipeline()

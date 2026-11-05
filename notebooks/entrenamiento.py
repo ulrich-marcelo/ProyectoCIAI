@@ -5,13 +5,11 @@ SCRIPT: Sintonización Bayesiana Unificada con W&B y Backtesting Walk-Forward
 ARQUITECTURAS: Logistic Regression, Random Forest, XGBoost y Tabular MLP
 ===============================================================================
 """
+
 import os
+# Prevención de deadlocks e interferencia de hilos OpenMP/MKL en Windows
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
-
-import joblib
-from joblib import parallel_backend
-from joblib.externals.loky import get_reusable_executor
 
 import gc
 import warnings
@@ -22,13 +20,15 @@ import numpy as np
 import pandas as pd
 import wandb
 
-from sklearn.impute import SimpleImputer
+import joblib
+from joblib import parallel_backend
+from joblib.externals.loky import get_reusable_executor
+
 from sklearn.preprocessing import OneHotEncoder, StandardScaler, OrdinalEncoder
 from sklearn.compose import ColumnTransformer
-from sklearn.pipeline import Pipeline
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import precision_recall_curve, auc
+from sklearn.metrics import precision_recall_curve, auc, roc_auc_score, brier_score_loss
 import xgboost as xgb
 
 import torch
@@ -36,27 +36,27 @@ import torch.nn as nn
 
 warnings.filterwarnings("ignore")
 
-# 1. Detección y diagnóstico de dispositivo
+# 1. Configuración de hardware
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-print(f"--- Dispositivo de cómputo seleccionado: {DEVICE.upper()} ---")
+print(f"\n--- Dispositivo de cómputo seleccionado: {DEVICE.upper()} ---")
 if DEVICE == "cuda":
-    print(f"GPU activa: {torch.cuda.get_device_name(0)}")
+    print(f"GPU activa: {torch.cuda.get_device_name(0)}\n")
 else:
-    print("ADVERTENCIA: GPU no detectada por PyTorch. Corriendo en CPU.")
+    print("ADVERTENCIA: GPU no detectada por PyTorch. Corriendo en CPU.\n")
 
-# Resolución robusta de la ruta del dataset
-PARQUET_FILE = Path("../data/eph_hogares_consolidada_2016_2026.parquet")
+PARQUET_FILE = Path("data/eph_hogares_consolidada_2016_2026.parquet")
 if not PARQUET_FILE.exists():
-    PARQUET_FILE = Path("data/eph_hogares_consolidada_2016_2026.parquet")
+    PARQUET_FILE = Path("../data/eph_hogares_consolidada_2016_2026.parquet")
 
 # =============================================================================
-# 1. EVALUACIÓN Y CALIBRACIÓN VECTORIZADA DE UMBRAL (F2-SCORE Y PR-AUC)
+# 1. EVALUACIÓN Y CALIBRACIÓN VECTORIZADA DE MÉTRICAS (F2-SCORE Y PR-AUC)
 # =============================================================================
 def calcular_metricas(y_true: np.ndarray, y_probs: np.ndarray) -> Dict[str, float]:
     precision, recall, thresholds = precision_recall_curve(y_true, y_probs)
     pr_auc = auc(recall, precision)
+    roc_auc = roc_auc_score(y_true, y_probs)
 
-    # Cálculo vectorizado sin bucles: F2 = 5 * (P * R) / (4 * P + R)
+    # Cálculo vectorizado de F2-Score: pondera el Recall el doble que la Precisión
     denominador = (4 * precision + recall)
     f2_scores = np.divide(
         5 * (precision * recall),
@@ -68,17 +68,40 @@ def calcular_metricas(y_true: np.ndarray, y_probs: np.ndarray) -> Dict[str, floa
     best_idx = np.argmax(f2_scores)
     best_f2 = float(f2_scores[best_idx])
     best_tau = float(thresholds[best_idx]) if best_idx < len(thresholds) else 0.5
-    recall_opt = float(recall[best_idx])
+
+    # Métricas evaluadas en el punto de corte óptimo tau*
+    y_pred = (y_probs >= best_tau).astype(int)
+    tp = np.sum((y_pred == 1) & (y_true == 1))
+    fp = np.sum((y_pred == 1) & (y_true == 0))
+    tn = np.sum((y_pred == 0) & (y_true == 0))
+    fn = np.sum((y_pred == 0) & (y_true == 1))
+
+    recall_opt = float(tp / (tp + fn)) if (tp + fn) > 0 else 0.0
+    precision_opt = float(tp / (tp + fp)) if (tp + fp) > 0 else 0.0
+    especificidad_opt = float(tn / (tn + fp)) if (tn + fp) > 0 else 0.0
+    f1_opt = float(2 * (precision_opt * recall_opt) / (precision_opt + recall_opt)) if (precision_opt + recall_opt) > 0 else 0.0
+
+    # Calibración probabilística
+    brier = float(brier_score_loss(y_true, y_probs))
+    eps = 1e-7
+    y_probs_clip = np.clip(y_probs, eps, 1.0 - eps)
+    logloss = float(-np.mean(y_true * np.log(y_probs_clip) + (1.0 - y_true) * np.log(1.0 - y_probs_clip)))
 
     return {
         "pr_auc": float(pr_auc),
+        "roc_auc": float(roc_auc),
         "f2_score": best_f2,
-        "optimal_threshold": best_tau,
-        "recall_at_optimal": recall_opt
+        "f1_score": f1_opt,
+        "recall": recall_opt,
+        "precision": precision_opt,
+        "especificidad": especificidad_opt,
+        "brier_score": brier,
+        "log_loss": logloss,
+        "optimal_threshold": best_tau
     }
 
 # =============================================================================
-# 2. ARQUITECTURA RED NEURONAL TABULAR (PYTORCH)
+# 2. RED NEURONAL TABULAR (PYTORCH)
 # =============================================================================
 class TabularMLP(nn.Module):
     def __init__(self, in_features: int, hidden_layers: List[int], dropout: float = 0.2):
@@ -103,9 +126,9 @@ def entrenar_evaluar_mlp(
     X_tr: np.ndarray, y_tr: np.ndarray, 
     X_va: np.ndarray, y_va: np.ndarray, 
     config: Dict[str, Any]
-) -> Dict[str, float]:
+) -> Tuple[Dict[str, float], Dict[str, float]]:
     
-    # Transferencia directa a VRAM (los 110k registros ocupan ~15 MB)
+    # Carga directa en memoria VRAM
     X_tr_t = torch.tensor(X_tr, dtype=torch.float32, device=DEVICE)
     y_tr_t = torch.tensor(y_tr, dtype=torch.float32, device=DEVICE).unsqueeze(1)
     X_va_t = torch.tensor(X_va, dtype=torch.float32, device=DEVICE)
@@ -141,17 +164,17 @@ def entrenar_evaluar_mlp(
 
     model.eval()
     with torch.no_grad():
-        probs = torch.sigmoid(model(X_va_t)).squeeze(1).cpu().numpy()
+        probs_tr = torch.sigmoid(model(X_tr_t)).squeeze(1).cpu().numpy()
+        probs_va = torch.sigmoid(model(X_va_t)).squeeze(1).cpu().numpy()
 
-    # Liberación forzada de memoria de video entre folds
     del model, optimizer, criterion, X_tr_t, y_tr_t, X_va_t
     if DEVICE == "cuda":
         torch.cuda.empty_cache()
 
-    return calcular_metricas(y_va, probs)
+    return calcular_metricas(y_tr, probs_tr), calcular_metricas(y_va, probs_va)
 
 # =============================================================================
-# 3. PREPROCESAMIENTO GLOBAL Y CACHÉ DE PLIEGUES EN MEMORIA
+# 3. AISLAMIENTO DE FEATURES Y VERIFICACIÓN ESTRICTA DE NaNs
 # =============================================================================
 PREPARED_FOLDS: List[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = []
 
@@ -160,12 +183,48 @@ def cargar_y_preprocesar_folds():
     if len(PREPARED_FOLDS) > 0:
         return
 
-    print("\n[Inicialización] Cargando Parquet y preparando folds temporales con purga...")
+    print("[Inicialización] Cargando Parquet y verificando ausencia de NaNs...")
     if not PARQUET_FILE.exists():
         raise FileNotFoundError(f"No se encontró el archivo: {PARQUET_FILE.resolve()}")
 
     df = pd.read_parquet(PARQUET_FILE)
     df_dev = df[df["ano4"] <= 2021].reset_index(drop=True)
+
+    # -------------------------------------------------------------------------
+    # COLUMNAS DE PROCESAMIENTO QUE NO DEBEN SER FEATURES PREDICTORAS
+    # -------------------------------------------------------------------------
+    cols_excluir = {
+        # Metadatos e identificadores de panel / purga
+        "codusu", "nro_hogar",
+        # Variables de tiempo utilizadas para el particionado temporal
+        "ano4", "trimestre",
+        # Target y umbral monetario analítico
+        "pobre", "linea_pobreza",
+        # Salvaguarda: exclusión de ponderadores y módulos no estructurales
+        "pondera", "pondih", "pondiio", "pondii",
+        "v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9", "v10", "v11", 
+        "v12", "v13", "v14", "v15", "v16", "v17", "v18", "v19_a", "v19_b", "v19_am", "v21", "v22",
+        "vii1_1", "vii1_2", "vii2_1", "vii2_2", "vii2_3", "vii2_4",
+        "ix_tot", "ix_men10", "ix_mayeq10"
+    }
+
+    # Espacio de features predictoras puras
+    todas_cols = [c for c in df_dev.columns if c not in cols_excluir]
+
+    # -------------------------------------------------------------------------
+    # FRENO DE EMERGENCIA POR NaNs / NAs (PROHIBICIÓN DE IMPUTACIÓN)
+    # -------------------------------------------------------------------------
+    nans_totales = df_dev[todas_cols].isna().sum()
+    cols_con_nan = nans_totales[nans_totales > 0]
+    if not cols_con_nan.empty:
+        detalle = "\n".join([f"  - {col}: {cant:,} NaNs" for col, cant in cols_con_nan.items()])
+        raise ValueError(
+            f"\n\n{'!'*70}\n"
+            f"¡FRENO DE EMERGENCIA! El dataset contiene valores NaN/NA y la imputación está prohibida.\n"
+            f"Columnas predictoras con faltantes:\n{detalle}\n"
+            f"Ejecutá limpieza.py para sanear la base antes de iniciar el entrenamiento.\n"
+            f"{'!'*70}\n"
+        )
 
     periodos = (
         df_dev[["ano4", "trimestre"]]
@@ -173,9 +232,6 @@ def cargar_y_preprocesar_folds():
         .sort_values(by=["ano4", "trimestre"])
         .values.tolist()
     )
-
-    cols_excluir = {"codusu", "nro_hogar", "linea_pobreza", "pobre", "ano4", "trimestre"}
-    todas_cols = [c for c in df_dev.columns if c not in cols_excluir]
 
     nominales = [c for c in ["region_estudio", "iv1", "ii7"] if c in todas_cols]
     ordinales = [c for c in ["max_educ_hogar", "jefe_nivel_ed"] if c in todas_cols]
@@ -191,27 +247,18 @@ def cargar_y_preprocesar_folds():
             train_mask |= (df_dev["ano4"] == a) & (df_dev["trimestre"] == t)
         val_mask = (df_dev["ano4"] == val_ano) & (df_dev["trimestre"] == val_trim)
 
-        # Purga inter-panel (EPH rotativo 2-2-2)
+        # Purga inter-panel: exclusión de hogares solapados en test
         hogares_val = set(df_dev.loc[val_mask, "codusu"].unique())
         train_mask_purged = train_mask & (~df_dev["codusu"].isin(hogares_val))
 
         train_sub = df_dev[train_mask_purged]
         val_sub = df_dev[val_mask]
 
-        # Pipeline con imputación robusta contra NaNs
+        # Preprocesamiento sin imputación
         preprocessor = ColumnTransformer(transformers=[
-            ("nom", Pipeline([
-                ("imputer", SimpleImputer(strategy="constant", fill_value="Desconocido")),
-                ("encoder", OneHotEncoder(drop="first", sparse_output=False, handle_unknown="ignore"))
-            ]), nominales),
-            ("ord", Pipeline([
-                ("imputer", SimpleImputer(strategy="most_frequent")),
-                ("encoder", OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=-1))
-            ]), ordinales),
-            ("num", Pipeline([
-                ("imputer", SimpleImputer(strategy="median")),
-                ("scaler", StandardScaler())
-            ]), numericas)
+            ("nom", OneHotEncoder(drop="first", sparse_output=False, handle_unknown="ignore"), nominales),
+            ("ord", OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=-1), ordinales),
+            ("num", StandardScaler(), numericas)
         ], remainder="drop")
 
         X_tr = preprocessor.fit_transform(train_sub[todas_cols]).astype(np.float32)
@@ -219,11 +266,14 @@ def cargar_y_preprocesar_folds():
         X_va = preprocessor.transform(val_sub[todas_cols]).astype(np.float32)
         y_va = val_sub["pobre"].values.astype(np.int32)
 
+        if np.isnan(X_tr).any() or np.isnan(X_va).any():
+            raise ValueError("¡FRENO DE EMERGENCIA! Se generaron valores NaNs durante la transformación numérica.")
+
         PREPARED_FOLDS.append((X_tr, y_tr, X_va, y_va))
 
     del df, df_dev
     gc.collect()
-    print(f"✓ {len(PREPARED_FOLDS)} pliegues procesados y almacenados en RAM. Listos para sweeps.\n")
+    print(f"✓ {len(PREPARED_FOLDS)} pliegues procesados sin NaNs y retenidos en RAM ({len(todas_cols)} features predictoras).\n")
 
 # =============================================================================
 # 4. WORKER UNIFICADO DE W&B SWEEPS
@@ -232,10 +282,10 @@ def train_sweep_iteration():
     run = wandb.init()
     cfg = wandb.config
 
-    # Asegurar que los datos estén cargados en memoria
     cargar_y_preprocesar_folds()
 
-    pr_aucs, f2s = [], []
+    val_metrics_list = []
+    train_metrics_list = []
 
     for X_tr, y_tr, X_va, y_va in PREPARED_FOLDS:
         if cfg.model_family == "logistic":
@@ -250,13 +300,13 @@ def train_sweep_iteration():
                 n_jobs=-1
             )
             model.fit(X_tr, y_tr)
-            probs = model.predict_proba(X_va)[:, 1]
-            metrics = calcular_metricas(y_va, probs)
+            probs_tr = model.predict_proba(X_tr)[:, 1]
+            probs_va = model.predict_proba(X_va)[:, 1]
+            m_tr = calcular_metricas(y_tr, probs_tr)
+            m_va = calcular_metricas(y_va, probs_va)
 
         elif cfg.model_family == "random_forest":
-            # Fijamos un número razonable de hilos (ej. 6 u 8) para no saturar el SO
             num_cpus = max(1, os.cpu_count() - 2) if os.cpu_count() else 4
-
             model = RandomForestClassifier(
                 n_estimators=200,
                 max_depth=cfg.max_depth,
@@ -265,16 +315,16 @@ def train_sweep_iteration():
                 class_weight="balanced",
                 random_state=42
             )
-            
-            # Usar hilos en lugar de procesos evita los cuelgues de memoria compartida en Windows
+            # Backend por subhilos para evitar deadlocks de memoria compartida en Windows
             with parallel_backend('threading', n_jobs=num_cpus):
                 model.fit(X_tr, y_tr)
-                probs = model.predict_proba(X_va)[:, 1]
-
-            metrics = calcular_metricas(y_va, probs)
+                probs_tr = model.predict_proba(X_tr)[:, 1]
+                probs_va = model.predict_proba(X_va)[:, 1]
+            m_tr = calcular_metricas(y_tr, probs_tr)
+            m_va = calcular_metricas(y_va, probs_va)
 
         elif cfg.model_family == "xgboost":
-            scale_pos = (len(y_tr) - np.sum(y_tr)) / max(np.sum(y_tr), 1)[cite: 4]
+            scale_pos = (len(y_tr) - np.sum(y_tr)) / max(np.sum(y_tr), 1)
             model = xgb.XGBClassifier(
                 tree_method="hist",
                 device=DEVICE,
@@ -289,8 +339,10 @@ def train_sweep_iteration():
                 random_state=42
             )
             model.fit(X_tr, y_tr, eval_set=[(X_va, y_va)], verbose=False)
-            probs = model.predict_proba(X_va)[:, 1]
-            metrics = calcular_metricas(y_va, probs)
+            probs_tr = model.predict_proba(X_tr)[:, 1]
+            probs_va = model.predict_proba(X_va)[:, 1]
+            m_tr = calcular_metricas(y_tr, probs_tr)
+            m_va = calcular_metricas(y_va, probs_va)
 
         elif cfg.model_family == "mlp":
             config_mlp = {
@@ -301,35 +353,55 @@ def train_sweep_iteration():
                 "batch_size": 2048,
                 "epochs": 15
             }
-            metrics = entrenar_evaluar_mlp(X_tr, y_tr, X_va, y_va, config_mlp)
+            m_tr, m_va = entrenar_evaluar_mlp(X_tr, y_tr, X_va, y_va, config_mlp)
 
-        pr_aucs.append(metrics["pr_auc"])
-        f2s.append(metrics["f2_score"])
+        train_metrics_list.append(m_tr)
+        val_metrics_list.append(m_va)
 
-    # Logueo del promedio de métricas sobre los 14 folds
-    wandb.log({
-        "mean_pr_auc": float(np.mean(pr_aucs)),
-        "mean_f2_score": float(np.mean(f2s))
-    })
-    # Forzar apagado de procesos huérfanos y limpieza de RAM
+    # Limpieza forzada de subprocesos
     if cfg.model_family == "random_forest":
         get_reusable_executor().shutdown(wait=True)
-    
     gc.collect()
 
+    # Logueo exhaustivo en Weights & Biases
     wandb.log({
-        "mean_pr_auc": float(np.mean(pr_aucs)),
-        "mean_f2_score": float(np.mean(f2s))
+        # PR-AUC
+        "val_mean_pr_auc": float(np.mean([m["pr_auc"] for m in val_metrics_list])),
+        "train_mean_pr_auc": float(np.mean([m["pr_auc"] for m in train_metrics_list])),
+        # ROC-AUC
+        "val_mean_roc_auc": float(np.mean([m["roc_auc"] for m in val_metrics_list])),
+        "train_mean_roc_auc": float(np.mean([m["roc_auc"] for m in train_metrics_list])),
+        # F2-Score y F1-Score
+        "val_mean_f2_score": float(np.mean([m["f2_score"] for m in val_metrics_list])),
+        "train_mean_f2_score": float(np.mean([m["f2_score"] for m in train_metrics_list])),
+        "val_mean_f1_score": float(np.mean([m["f1_score"] for m in val_metrics_list])),
+        "train_mean_f1_score": float(np.mean([m["f1_score"] for m in train_metrics_list])),
+        # Métricas operativas en corte óptimo tau*
+        "val_mean_recall": float(np.mean([m["recall"] for m in val_metrics_list])),
+        "train_mean_recall": float(np.mean([m["recall"] for m in train_metrics_list])),
+        "val_mean_precision": float(np.mean([m["precision"] for m in val_metrics_list])),
+        "train_mean_precision": float(np.mean([m["precision"] for m in train_metrics_list])),
+        "val_mean_especificidad": float(np.mean([m["especificidad"] for m in val_metrics_list])),
+        "train_mean_especificidad": float(np.mean([m["especificidad"] for m in train_metrics_list])),
+        # Calibración y entropía
+        "val_mean_brier_score": float(np.mean([m["brier_score"] for m in val_metrics_list])),
+        "train_mean_brier_score": float(np.mean([m["brier_score"] for m in train_metrics_list])),
+        "val_mean_log_loss": float(np.mean([m["log_loss"] for m in val_metrics_list])),
+        "train_mean_log_loss": float(np.mean([m["log_loss"] for m in train_metrics_list])),
+        # Umbral promedio y diagnóstico de sobreajuste
+        "mean_optimal_threshold": float(np.mean([m["optimal_threshold"] for m in val_metrics_list])),
+        "gap_pr_auc": float(np.mean([m["pr_auc"] for m in train_metrics_list]) - np.mean([m["pr_auc"] for m in val_metrics_list])),
+        "gap_f2_score": float(np.mean([m["f2_score"] for m in train_metrics_list]) - np.mean([m["f2_score"] for m in val_metrics_list]))
     })
     run.finish()
 
 # =============================================================================
-# 5. CONFIGURACIONES DE SWEEPS BAYESIANOS POR MODELO
+# 5. CONFIGURACIONES DE SWEEPS BAYESIANOS
 # =============================================================================
 SWEEP_CONFIGS = {
     "logistic": {
         "method": "bayes",
-        "metric": {"name": "mean_pr_auc", "goal": "maximize"},
+        "metric": {"name": "val_mean_pr_auc", "goal": "maximize"},
         "parameters": {
             "model_family": {"value": "logistic"},
             "C": {"distribution": "log_uniform_values", "min": 1e-4, "max": 100.0}
@@ -337,7 +409,7 @@ SWEEP_CONFIGS = {
     },
     "random_forest": {
         "method": "bayes",
-        "metric": {"name": "mean_pr_auc", "goal": "maximize"},
+        "metric": {"name": "val_mean_pr_auc", "goal": "maximize"},
         "parameters": {
             "model_family": {"value": "random_forest"},
             "max_depth": {"values": [8, 12, 16, 20]},
@@ -347,7 +419,7 @@ SWEEP_CONFIGS = {
     },
     "xgboost": {
         "method": "bayes",
-        "metric": {"name": "mean_pr_auc", "goal": "maximize"},
+        "metric": {"name": "val_mean_pr_auc", "goal": "maximize"},
         "parameters": {
             "model_family": {"value": "xgboost"},
             "learning_rate": {"distribution": "log_uniform_values", "min": 0.01, "max": 0.2},
@@ -359,7 +431,7 @@ SWEEP_CONFIGS = {
     },
     "mlp": {
         "method": "bayes",
-        "metric": {"name": "mean_pr_auc", "goal": "maximize"},
+        "metric": {"name": "val_mean_pr_auc", "goal": "maximize"},
         "parameters": {
             "model_family": {"value": "mlp"},
             "hidden_layers": {"values": [[256, 128], [512, 256, 128], [128, 64]]},
@@ -375,13 +447,13 @@ SWEEP_CONFIGS = {
 # =============================================================================
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description="Pipeline de entrenamiento con EPH")
+    parser = argparse.ArgumentParser(description="Pipeline de entrenamiento con control estricto de NaNs")
     parser.add_argument("--model", choices=["logistic", "random_forest", "xgboost", "mlp"], required=True)
     parser.add_argument("--project", default="eph-pobreza-ml", help="Nombre del proyecto en W&B")
     parser.add_argument("--count", type=int, default=30, help="Cantidad de iteraciones bayesianas")
     args = parser.parse_args()
 
-    # Preprocesar los 14 folds en RAM antes de iniciar el agente
+    # Carga de datos y verificación de ausencia de NaNs
     cargar_y_preprocesar_folds()
 
     sweep_config = SWEEP_CONFIGS[args.model]
