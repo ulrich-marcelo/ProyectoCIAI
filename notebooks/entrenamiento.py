@@ -3,6 +3,11 @@
 PROYECTO: Modelado de Pobreza con EPH (Machine Learning)
 SCRIPT: Sintonización Bayesiana Unificada con W&B y Backtesting Walk-Forward
 ARQUITECTURAS: Logistic Regression, Random Forest, XGBoost y Tabular MLP
+CORRECCIONES:
+- Clasificación rigurosa de features (Nominales, Ordinales, Binarias 0/1 y Continuas)
+- Escalado de variables ordinales para MLP y Logistic
+- Función constructora robusta para XGBoost
+- Control de hilos para permitir 4 ejecuciones en paralelo
 ===============================================================================
 """
 
@@ -13,7 +18,6 @@ import torch.nn as nn
 import os
 import sys
 
-# Diagnóstico de entorno y hardware
 print("=" * 70)
 print(f"Intérprete Python en uso: {sys.executable}")
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -21,10 +25,10 @@ print(f"Dispositivo de cómputo para PyTorch: {DEVICE.upper()}")
 if DEVICE == "cuda":
     print(f"GPU activa: {torch.cuda.get_device_name(0)}")
 else:
-    print("ADVERTENCIA: PyTorch sigue sin detectar GPU. Verificá tu entorno.")
+    print("ADVERTENCIA: PyTorch en CPU.")
 print("=" * 70 + "\n")
 
-# Configuración de hilos para CPU
+# Configuración de hilos base
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
 
@@ -41,6 +45,7 @@ import joblib
 from joblib import parallel_backend
 from joblib.externals.loky import get_reusable_executor
 
+from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler, OrdinalEncoder
 from sklearn.compose import ColumnTransformer
 from sklearn.linear_model import LogisticRegression
@@ -53,6 +58,10 @@ warnings.filterwarnings("ignore")
 PARQUET_FILE = Path("data/eph_hogares_consolidada_2016_2026.parquet")
 if not PARQUET_FILE.exists():
     PARQUET_FILE = Path("../data/eph_hogares_consolidada_2016_2026.parquet")
+
+
+random_forest_n_jobs = -1
+
 
 # =============================================================================
 # 1. EVALUACIÓN Y CALIBRACIÓN VECTORIZADA DE MÉTRICAS (F2-SCORE Y PR-AUC)
@@ -176,7 +185,7 @@ def entrenar_evaluar_mlp(
     return calcular_metricas(y_tr, probs_tr), calcular_metricas(y_va, probs_va)
 
 # =============================================================================
-# 3. CONSTRUCTOR ROBUSTO PARA XGBOOST (COMPATIBLE CON VERSIONES 1.X Y 2.X)
+# 3. CONSTRUCTOR ROBUSTO PARA XGBOOST
 # =============================================================================
 def construir_modelo_xgboost(cfg: Any, scale_pos: float) -> xgb.XGBClassifier:
     xgb_major_ver = int(xgb.__version__.split(".")[0])
@@ -193,17 +202,21 @@ def construir_modelo_xgboost(cfg: Any, scale_pos: float) -> xgb.XGBClassifier:
         "random_state": 42
     }
 
-    # XGBoost 2.0+ usa device="cuda"/"cpu". XGBoost 1.x usa tree_method="gpu_hist"/"hist"
-    if xgb_major_ver >= 2:
-        params["tree_method"] = "hist"
-        params["device"] = DEVICE
+    if DEVICE == "cuda":
+        if xgb_major_ver >= 2:
+            params["tree_method"] = "hist"
+            params["device"] = "cuda"
+        else:
+            params["tree_method"] = "gpu_hist"
+            params["gpu_id"] = 0
     else:
-        params["tree_method"] = "gpu_hist" if DEVICE == "cuda" else "hist"
+        params["tree_method"] = "hist"
+        params["n_jobs"] = 4  # Límite controlado para no saturar CPU
 
     return xgb.XGBClassifier(**params)
 
 # =============================================================================
-# 4. AISLAMIENTO DE FEATURES Y VERIFICACIÓN ESTRICTA DE NaNs
+# 4. PREPROCESAMIENTO RIGUROSO Y CACHÉ DE FOLDS EN MEMORIA
 # =============================================================================
 PREPARED_FOLDS: List[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = []
 
@@ -212,7 +225,7 @@ def cargar_y_preprocesar_folds():
     if len(PREPARED_FOLDS) > 0:
         return
 
-    print("[Inicialización] Cargando Parquet y verificando ausencia de NaNs...")
+    print("[Inicialización] Cargando Parquet y aplicando partición estricta de variables...")
     if not PARQUET_FILE.exists():
         raise FileNotFoundError(f"No se encontró el archivo: {PARQUET_FILE.resolve()}")
 
@@ -230,18 +243,40 @@ def cargar_y_preprocesar_folds():
 
     todas_cols = [c for c in df_dev.columns if c not in cols_excluir]
 
-    # Freno estricto si hay nulos en las variables predictoras
     nans_totales = df_dev[todas_cols].isna().sum()
     cols_con_nan = nans_totales[nans_totales > 0]
     if not cols_con_nan.empty:
         detalle = "\n".join([f"  - {col}: {cant:,} NaNs" for col, cant in cols_con_nan.items()])
         raise ValueError(
             f"\n\n{'!'*70}\n"
-            f"¡FRENO DE EMERGENCIA! El dataset contiene valores NaN/NA y la imputación está prohibida.\n"
-            f"Columnas predictoras con faltantes:\n{detalle}\n"
-            f"Ejecutá limpieza.py para sanear la base antes de reanudar el entrenamiento.\n"
+            f"¡FRENO DE EMERGENCIA! Se detectaron NaNs y la imputación está prohibida:\n{detalle}\n"
             f"{'!'*70}\n"
         )
+
+    # -------------------------------------------------------------------------
+    # PARTICIÓN FORMAL SEGÚN DISEÑO DE REGISTRO EPH
+    # -------------------------------------------------------------------------
+    # 1. Nominales y Categóricas dicotómicas (1=Sí, 2=No) -> OneHotEncoder
+    nominales_y_binarias_encuesta = [c for c in [
+        "region_estudio", "iv1", "iv3", "iv4", "iv5", "iv6", "iv8", "iv9", 
+        "iv10", "iv11", "iv12_1", "iv12_2", "iv12_3", "ii3", "ii3_1", 
+        "ii4_1", "ii4_2", "ii4_3", "ii5", "ii5_1", "ii6", "ii6_1", "ii7", "ii8"
+    ] if c in todas_cols]
+
+    # 2. Ordinales con jerarquía natural -> OrdinalEncoder + StandardScaler
+    ordinales = [c for c in [
+        "max_educ_hogar", "jefe_nivel_ed", "iv7", "ii9"
+    ] if c in todas_cols]
+
+    # 3. Binarias nativas construidas en Python (0 ó 1 puro) -> Passthrough directo
+    binarias_puras = [c for c in [
+        "jefe_mujer", "jefe_ocupado", "jefe_desocupado", "jefe_informal", "hacinamiento_critico"
+    ] if c in todas_cols]
+
+    # 4. Continuas, conteos y ratios -> StandardScaler
+    numericas = [c for c in todas_cols if c not in nominales_y_binarias_encuesta and c not in ordinales and c not in binarias_puras]
+
+    print(f"Features identificadas -> Categóricas One-Hot: {len(nominales_y_binarias_encuesta)} | Ordinales: {len(ordinales)} | Binarias 0/1: {len(binarias_puras)} | Numéricas: {len(numericas)}")
 
     periodos = (
         df_dev[["ano4", "trimestre"]]
@@ -249,10 +284,6 @@ def cargar_y_preprocesar_folds():
         .sort_values(by=["ano4", "trimestre"])
         .values.tolist()
     )
-
-    nominales = [c for c in ["region_estudio", "iv1", "ii7"] if c in todas_cols]
-    ordinales = [c for c in ["max_educ_hogar", "jefe_nivel_ed"] if c in todas_cols]
-    numericas = [c for c in todas_cols if c not in nominales and c not in ordinales]
 
     train_quarters = 8
     for i in range(train_quarters, len(periodos)):
@@ -264,15 +295,21 @@ def cargar_y_preprocesar_folds():
             train_mask |= (df_dev["ano4"] == a) & (df_dev["trimestre"] == t)
         val_mask = (df_dev["ano4"] == val_ano) & (df_dev["trimestre"] == val_trim)
 
+        # Purga inter-panel obligatoria
         hogares_val = set(df_dev.loc[val_mask, "codusu"].unique())
         train_mask_purged = train_mask & (~df_dev["codusu"].isin(hogares_val))
 
         train_sub = df_dev[train_mask_purged]
         val_sub = df_dev[val_mask]
 
+        # Pipeline sin imputadores
         preprocessor = ColumnTransformer(transformers=[
-            ("nom", OneHotEncoder(drop="first", sparse_output=False, handle_unknown="ignore"), nominales),
-            ("ord", OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=-1), ordinales),
+            ("nom", OneHotEncoder(drop="first", sparse_output=False, handle_unknown="ignore"), nominales_y_binarias_encuesta),
+            ("ord", Pipeline([
+                ("encoder", OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=-1)),
+                ("scaler", StandardScaler())
+            ]), ordinales),
+            ("bin", "passthrough", binarias_puras),
             ("num", StandardScaler(), numericas)
         ], remainder="drop")
 
@@ -282,13 +319,13 @@ def cargar_y_preprocesar_folds():
         y_va = val_sub["pobre"].values.astype(np.int32)
 
         if np.isnan(X_tr).any() or np.isnan(X_va).any():
-            raise ValueError("¡FRENO DE EMERGENCIA! Se generaron NaNs durante el preprocesamiento numérico.")
+            raise ValueError("¡FRENO DE EMERGENCIA! Se detectaron NaNs post-transformación.")
 
         PREPARED_FOLDS.append((X_tr, y_tr, X_va, y_va))
 
     del df, df_dev
     gc.collect()
-    print(f"✓ {len(PREPARED_FOLDS)} pliegues procesados sin NaNs y retenidos en RAM ({len(todas_cols)} features predictoras).\n")
+    print(f"✓ {len(PREPARED_FOLDS)} pliegues procesados correctamente y retenidos en RAM.\n")
 
 # =============================================================================
 # 5. WORKER UNIFICADO DE W&B SWEEPS
@@ -312,7 +349,7 @@ def train_sweep_iteration():
                 class_weight="balanced",
                 max_iter=500,
                 random_state=42,
-                n_jobs=-1
+                n_jobs=2  # Balanceado para paralelismo
             )
             model.fit(X_tr, y_tr)
             probs_tr = model.predict_proba(X_tr)[:, 1]
@@ -321,9 +358,8 @@ def train_sweep_iteration():
             m_va = calcular_metricas(y_va, probs_va)
 
         elif cfg.model_family == "random_forest":
-            num_cpus = max(1, os.cpu_count() - 2) if os.cpu_count() else 4
+            num_cpus = 4 if os.cpu_count() and os.cpu_count() >= 8 else max(1, (os.cpu_count() or 4) - 2)
 
-            # Resguardo: si es numérico se pasa como float, si es 'sqrt' se preserva como str
             max_feat = cfg.max_features
             try:
                 max_feat = float(max_feat)
@@ -344,23 +380,24 @@ def train_sweep_iteration():
                 probs_va = model.predict_proba(X_va)[:, 1]
             m_tr = calcular_metricas(y_tr, probs_tr)
             m_va = calcular_metricas(y_va, probs_va)
-            
+
         elif cfg.model_family == "xgboost":
             scale_pos = (len(y_tr) - np.sum(y_tr)) / max(np.sum(y_tr), 1)
-            model = xgb.XGBClassifier(
-                tree_method="gpu_hist",
-                gpu_id=0,
-                n_estimators=400,
-                learning_rate=cfg.learning_rate,
-                max_depth=cfg.max_depth,
-                subsample=cfg.subsample,
-                colsample_bytree=cfg.colsample_bytree,
-                scale_pos_weight=scale_pos * cfg.scale_pos_factor,
-                early_stopping_rounds=30,
-                eval_metric="aucpr",
-                random_state=42
-            )
-            model.fit(X_tr, y_tr, eval_set=[(X_va, y_va)], verbose=False)
+            model = construir_modelo_xgboost(cfg, scale_pos)
+            
+            try:
+                model.fit(X_tr, y_tr, eval_set=[(X_va, y_va)], verbose=False)
+            except Exception as e:
+                if "CUDA" in str(e) or "GPU" in str(e) or "device" in str(e):
+                    xgb_ver = int(xgb.__version__.split(".")[0])
+                    if xgb_ver >= 2:
+                        model.set_params(tree_method="hist", device="cpu", n_jobs=4)
+                    else:
+                        model.set_params(tree_method="hist", n_jobs=4)
+                    model.fit(X_tr, y_tr, eval_set=[(X_va, y_va)], verbose=False)
+                else:
+                    raise e
+
             probs_tr = model.predict_proba(X_tr)[:, 1]
             probs_va = model.predict_proba(X_va)[:, 1]
             m_tr = calcular_metricas(y_tr, probs_tr)
@@ -426,10 +463,8 @@ SWEEP_CONFIGS = {
         "metric": {"name": "val_mean_pr_auc", "goal": "maximize"},
         "parameters": {
             "model_family": {"value": "random_forest"},
-            # Distribuciones enteras para dar densidad al estimador bayesiano
             "max_depth": {"distribution": "int_uniform", "min": 6, "max": 22},
             "min_samples_leaf": {"distribution": "int_uniform", "min": 4, "max": 35},
-            # max_features queda como el único parámetro categórico
             "max_features": {"values": ["sqrt", 0.25, 0.4, 0.55]}
         }
     },
