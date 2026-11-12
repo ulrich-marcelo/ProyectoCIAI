@@ -26,6 +26,7 @@ from sklearn.preprocessing import OneHotEncoder, StandardScaler, OrdinalEncoder
 from sklearn.compose import ColumnTransformer
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import average_precision_score, brier_score_loss, fbeta_score
 from joblib import parallel_backend
 from joblib.externals.loky import get_reusable_executor
 import xgboost as xgb
@@ -33,7 +34,6 @@ import xgboost as xgb
 # -----------------------------------------------------------------------------
 # SUPRESIÓN DE ADVERTENCIAS ESPERADAS
 # -----------------------------------------------------------------------------
-# Silenciar advertencia de OneHotEncoder cuando rellena con ceros categorías desconocidas
 warnings.filterwarnings(
     "ignore",
     message="Found unknown categories in columns",
@@ -246,6 +246,13 @@ class TabularMLP(nn.Module):
 
 
 def entrenar_modelo_mlp(X_tr: np.ndarray, y_tr: np.ndarray, params: Dict[str, Any]) -> TabularMLP:
+    # -------------------------------------------------------------------------
+    # CORRECCIÓN 2: Fijar semillas en PyTorch para garantizar reproducibilidad
+    # -------------------------------------------------------------------------
+    torch.manual_seed(42)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(42)
+
     X_tr_t = torch.tensor(X_tr, dtype=torch.float32, device=DEVICE)
     y_tr_t = torch.tensor(y_tr, dtype=torch.float32, device=DEVICE).unsqueeze(1)
 
@@ -393,6 +400,12 @@ def preparar_datos():
     X_test = preprocessor.transform(df_test[todas_cols]).astype(np.float32)
     y_test = df_test["pobre"].values.astype(np.int32) if "pobre" in df_test.columns else None
 
+    # -------------------------------------------------------------------------
+    # CORRECCIÓN 1: Freno estricto de NaNs post-transformación
+    # -------------------------------------------------------------------------
+    if np.isnan(X_train).any() or np.isnan(X_test).any():
+        raise ValueError("Se detectaron valores NaN tras el preprocesamiento. Revisar limpieza.py.")
+
     # Guardar artefactos
     joblib.dump(preprocessor, OUTPUT_MODEL_DIR / "preprocessor_fitted.joblib")
     joblib.dump(todas_cols, OUTPUT_MODEL_DIR / "feature_names_raw.joblib")
@@ -403,12 +416,15 @@ def preparar_datos():
 # -----------------------------------------------------------------------------
 # ENTRENAMIENTO E INFERENCIA POR FAMILIA
 # -----------------------------------------------------------------------------
-def ejecutar_familia(familia: str, X_tr: np.ndarray, y_tr: np.ndarray, X_te: np.ndarray, df_test: pd.DataFrame):
+def ejecutar_familia(familia: str, X_tr: np.ndarray, y_tr: np.ndarray, X_te: np.ndarray, df_test: pd.DataFrame, df_train: pd.DataFrame):
     print(f"\n[3/4] Reentrenando Top 3 de la familia: {familia.upper()}...")
     configs = CONFIGS_TOP3[familia]
 
+    # -------------------------------------------------------------------------
+    # CORRECCIÓN 4: Incluir region_estudio y cant_miembros en cols_meta
+    # -------------------------------------------------------------------------
     cols_meta = ["codusu", "nro_hogar", "ano4", "trimestre"]
-    for c in ["pobre", "pondih", "pondera", "linea_pobreza"]:
+    for c in ["pobre", "pondih", "pondera", "linea_pobreza", "region_estudio", "cant_miembros"]:
         if c in df_test.columns:
             cols_meta.append(c)
 
@@ -418,6 +434,8 @@ def ejecutar_familia(familia: str, X_tr: np.ndarray, y_tr: np.ndarray, X_te: np.
     prob_preds = []
 
     scale_pos = (len(y_tr) - np.sum(y_tr)) / max(np.sum(y_tr), 1)
+    w_tr = df_train["pondih"].values if "pondih" in df_train.columns else np.ones_like(y_tr)
+    tasa_real_tr = np.average(y_tr, weights=w_tr) * 100
 
     for cfg_info in configs:
         cfg_id = cfg_info["id"]
@@ -428,7 +446,6 @@ def ejecutar_familia(familia: str, X_tr: np.ndarray, y_tr: np.ndarray, X_te: np.
         print(f"   -> Entrenando {cfg_id} ({cfg_name}) con tau = {tau:.4f}...")
 
         if familia == "logistic":
-            # Sin 'penalty' ni 'n_jobs' (obsoletos/deprecados en sklearn >= 1.8)
             model = LogisticRegression(
                 C=params["C"],
                 solver=params.get("solver", "lbfgs"),
@@ -438,6 +455,10 @@ def ejecutar_familia(familia: str, X_tr: np.ndarray, y_tr: np.ndarray, X_te: np.
             )
             model.fit(X_tr, y_tr)
             probs_te = model.predict_proba(X_te)[:, 1]
+            # -------------------------------------------------------------------------
+            # CORRECCIÓN 5: Auditoría interna de Train
+            # -------------------------------------------------------------------------
+            probs_tr = model.predict_proba(X_tr)[:, 1]
             joblib.dump(model, OUTPUT_MODEL_DIR / f"{familia}_{cfg_id}.joblib")
 
         elif familia == "random_forest":
@@ -453,6 +474,7 @@ def ejecutar_familia(familia: str, X_tr: np.ndarray, y_tr: np.ndarray, X_te: np.
             with parallel_backend("loky"):
                 model.fit(X_tr, y_tr)
                 probs_te = model.predict_proba(X_te)[:, 1]
+                probs_tr = model.predict_proba(X_tr)[:, 1]
             get_reusable_executor().shutdown(wait=True)
             joblib.dump(model, OUTPUT_MODEL_DIR / f"{familia}_{cfg_id}.joblib")
 
@@ -480,14 +502,38 @@ def ejecutar_familia(familia: str, X_tr: np.ndarray, y_tr: np.ndarray, X_te: np.
             model = xgb.XGBClassifier(**xgb_params)
             model.fit(X_tr, y_tr, verbose=False)
             probs_te = model.predict_proba(X_te)[:, 1]
+            probs_tr = model.predict_proba(X_tr)[:, 1]
             joblib.dump(model, OUTPUT_MODEL_DIR / f"{familia}_{cfg_id}.joblib")
 
         elif familia == "mlp":
             model = entrenar_modelo_mlp(X_tr, y_tr, params)
             probs_te = predecir_mlp(model, X_te)
-            torch.save(model.state_dict(), OUTPUT_MODEL_DIR / f"{familia}_{cfg_id}.pt")
+            probs_tr = predecir_mlp(model, X_tr)
+            
+            # -------------------------------------------------------------------------
+            # CORRECCIÓN 3: Guardar diccionario completo para reconstruir MLP en SHAP
+            # -------------------------------------------------------------------------
+            torch.save({
+                "state_dict": model.state_dict(),
+                "in_features": X_tr.shape[1],
+                "params": params,
+                "tau": tau
+            }, OUTPUT_MODEL_DIR / f"{familia}_{cfg_id}.pt")
 
-        # Inferencia binaria según el tau óptimo
+        # -------------------------------------------------------------------------
+        # CORRECCIÓN 5: Predicción Train y logueo de Baseline
+        # -------------------------------------------------------------------------
+        preds_tr = (probs_tr >= tau).astype(int)
+        
+        pr_auc_tr = average_precision_score(y_tr, probs_tr)
+        brier_tr = brier_score_loss(y_tr, probs_tr)
+        f2_tr = fbeta_score(y_tr, preds_tr, beta=2)
+        tasa_pred_tr = np.average(preds_tr, weights=w_tr) * 100
+        
+        print(f"      [Línea Base Train] PR-AUC: {pr_auc_tr:.4f} | Brier: {brier_tr:.4f} | F2: {f2_tr:.4f}")
+        print(f"      [Línea Base Train] Tasa Pobreza Real: {tasa_real_tr:.2f}% vs Pred: {tasa_pred_tr:.2f}%")
+
+        # Inferencia binaria según el tau óptimo para OOS
         preds_te = (probs_te >= tau).astype(int)
 
         res_df[f"prob_{familia}_{cfg_id}"] = probs_te.astype(np.float32)
@@ -535,7 +581,7 @@ if __name__ == "__main__":
     modelos_a_ejecutar = [args.model] if args.model != "all" else ["logistic", "random_forest", "xgboost", "mlp"]
 
     for mod in modelos_a_ejecutar:
-        ejecutar_familia(mod, X_train, y_train, X_test, df_test)
+        ejecutar_familia(mod, X_train, y_train, X_test, df_test, df_train)
 
     print("\n" + "=" * 70)
     print("PROCESO FINALIZADO CON ÉXITO.")
