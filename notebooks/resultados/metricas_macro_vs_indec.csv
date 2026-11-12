@@ -1,0 +1,22 @@
+Familia,Modelo,MAE (pp),RMSE (pp),MBE_Sesgo (pp),Max_Abs_Error (pp),Precision_Direccional (%),N_Semestres
+Benchmark_EPH,EPH_Muestra_Real,1.03,1.11,0.87,1.99,87.5,9
+mlp,mlp_soft,6.15,7.11,3.98,11.47,50.0,9
+xgboost,xgboost_soft,6.46,7.35,4.36,11.84,50.0,9
+random,random_forest_soft,6.63,7.49,4.57,12.17,50.0,9
+logistic,logistic_soft,6.99,7.79,5.06,12.53,50.0,9
+mlp,mlp_cfg2,13.54,14.67,13.39,20.41,50.0,9
+mlp,mlp_cfg1,13.81,14.98,13.73,21.1,62.5,9
+logistic,logistic_cfg2,14.21,15.45,14.21,21.55,50.0,9
+logistic,logistic_cfg1,14.22,15.46,14.22,21.58,50.0,9
+logistic,logistic_votacion,14.23,15.46,14.23,21.59,50.0,9
+logistic,logistic_cfg3,14.24,15.48,14.24,21.66,50.0,9
+mlp,mlp_votacion,14.26,15.47,14.26,21.52,50.0,9
+xgboost,xgboost_cfg2,14.68,15.89,14.68,21.75,50.0,9
+random,random_forest_cfg1,15.18,16.34,15.18,22.86,50.0,9
+xgboost,xgboost_votacion,15.27,16.43,15.27,22.49,50.0,9
+xgboost,xgboost_cfg3,15.38,16.55,15.38,22.71,50.0,9
+random,random_forest_votacion,15.4,16.53,15.4,23.15,37.5,9
+random,random_forest_cfg3,15.41,16.55,15.41,23.21,37.5,9
+random,random_forest_cfg2,15.68,16.8,15.68,23.44,37.5,9
+xgboost,xgboost_cfg1,15.79,16.89,15.79,22.89,50.0,9
+mlp,mlp_cfg3,16.36,17.42,16.36,23.63,50.0,9
