@@ -143,6 +143,98 @@ def evaluar_clasificacion_micro(
     return metricas
 
 
+def graficar_matrices_confusion_pre_calibracion(
+    dfs_familia: Dict[str, pd.DataFrame],
+    y_true: np.ndarray,
+    sample_weight: Optional[np.ndarray],
+    out_path: Path
+) -> Optional[Path]:
+    """
+    Genera y guarda una figura multipanel con las matrices de confusión (ponderadas por PONDIH)
+    para cada familia de modelos utilizando las predicciones originales ANTES de calibrar
+    (ensamble de votación F2).
+    """
+    familias_validas = []
+    for fam, df_f in dfs_familia.items():
+        col_pred = f"pred_{fam}_ensamble_votacion"
+        if col_pred in df_f.columns:
+            familias_validas.append((fam, df_f[col_pred].values.astype(int)))
+
+    if not familias_validas:
+        return None
+
+    n_fams = len(familias_validas)
+    ncols = 2 if n_fams > 1 else 1
+    nrows = int(np.ceil(n_fams / ncols))
+
+    fig, axes = plt.subplots(nrows, ncols, figsize=(6.2 * ncols, 5.2 * nrows), dpi=300)
+    axes_flat = np.atleast_1d(axes).ravel()
+
+    etiquetas = ["No Pobre (0)", "Pobre (1)"]
+
+    for idx, (fam, y_pred_raw) in enumerate(familias_validas):
+        ax = axes_flat[idx]
+        cm = confusion_matrix(y_true, y_pred_raw, sample_weight=sample_weight)
+        cm_norm = cm.astype(np.float64) / np.maximum(cm.sum(axis=1, keepdims=True), 1.0) * 100.0
+
+        tn, fp, fn, tp = cm.ravel()
+        acc = (tp + tn) / max(tp + tn + fp + fn, 1.0)
+        prec = tp / max(tp + fp, 1.0)
+        rec = tp / max(tp + fn, 1.0)
+        f2 = fbeta_score(y_true, y_pred_raw, beta=2, sample_weight=sample_weight, zero_division=0)
+
+        im = ax.imshow(cm_norm, interpolation="nearest", cmap="Blues", vmin=0, vmax=100)
+        cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        cbar.ax.tick_params(labelsize=8)
+        cbar.set_label("% por clase real", fontsize=8)
+
+        ax.set_xticks([0, 1])
+        ax.set_yticks([0, 1])
+        ax.set_xticklabels(etiquetas, fontsize=9)
+        ax.set_yticklabels(etiquetas, fontsize=9)
+        ax.set_xlabel("Predicción (Antes de Calibrar - Votación F2)", fontsize=9, fontweight="bold")
+        ax.set_ylabel("Clase Real (EPH)", fontsize=9, fontweight="bold")
+        ax.set_title(
+            f"{fam.upper()}\nAcc: {acc:.1%} | Prec: {prec:.1%} | Rec: {rec:.1%} | F2: {f2:.3f}",
+            fontsize=10,
+            fontweight="bold",
+            pad=10
+        )
+
+        # Anotaciones dentro de cada celda (Conteo ponderado + Porcentaje fila)
+        for i in range(2):
+            for j in range(2):
+                valor_abs = cm[i, j]
+                valor_pct = cm_norm[i, j]
+                color_txt = "white" if valor_pct > 55.0 else "black"
+                texto_celda = (
+                    f"{valor_pct:.1f}%\n"
+                    f"({valor_abs:,.0f})"
+                )
+                ax.text(
+                    j, i, texto_celda,
+                    ha="center", va="center",
+                    color=color_txt, fontsize=9.5, fontweight="bold"
+                )
+
+    # Ocultar ejes sobrantes si el número de familias es impar
+    for idx_extra in range(n_fams, len(axes_flat)):
+        axes_flat[idx_extra].axis("off")
+
+    nota_peso = "ponderadas por PONDIH" if sample_weight is not None else "sin ponderar"
+    plt.suptitle(
+        f"Matrices de Confusión OOS (2022+) — Predicciones Antes de Calibrar ({nota_peso})",
+        fontsize=12.5,
+        fontweight="bold",
+        y=1.01
+    )
+    plt.tight_layout()
+    plt.savefig(out_path, bbox_inches="tight")
+    plt.close()
+
+    return out_path
+
+
 # -----------------------------------------------------------------------------
 # 4. MÉTRICAS MACRO (NIVEL SEMESTRAL)
 # -----------------------------------------------------------------------------
@@ -254,8 +346,17 @@ def main():
 
     # 2. Resumen Micro a nivel hogar (Ponderado por PONDIH)
     filas_micro = []
+    cm_fig_path = None
     if tiene_pobre_real:
         y_true = df_base["pobre"].values.astype(int)
+
+        # Generar matrices de confusión gráficas con predicciones ANTES de calibrar
+        cm_fig_path = graficar_matrices_confusion_pre_calibracion(
+            dfs_familia=dfs_familia,
+            y_true=y_true,
+            sample_weight=w_micro,
+            out_path=OUT_DIR / "matrices_confusion_pre_calibracion.png"
+        )
 
         for fam, df_f in dfs_familia.items():
             # a) Ensamble Votación Original (Régimen A: Focalización F2, tau ~ 0.26)
@@ -423,6 +524,8 @@ def main():
     print("\n" + "=" * 88)
     print("✓ Evaluación finalizada con éxito.")
     print(f"  - Métricas Micro: {OUT_DIR.resolve() / 'metricas_micro_hogar_oos.csv'}")
+    if cm_fig_path is not None:
+        print(f"  - Matrices Conf.: {cm_fig_path.resolve()}")
     print(f"  - Tasas Semestr.: {OUT_DIR.resolve() / 'tasas_semestrales_pobreza_hogares.csv'}")
     print(f"  - Métricas Macro: {OUT_DIR.resolve() / 'metricas_macro_vs_indec.csv'}")
     print(f"  - Gráfico Dual:   {fig_path.resolve()}")

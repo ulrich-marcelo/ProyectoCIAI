@@ -22,14 +22,14 @@ def auditar_pobreza_hogares(parquet_path: str = "data/eph_hogares_consolidada_20
     if not path.exists():
         raise FileNotFoundError(f"No se encontró el archivo: {path.resolve()}")
 
-    df = pd.read_parquet(path, columns=['ano4', 'trimestre', 'pobre'])
-    validos = df.dropna(subset=['pobre']).copy()
+    df = pd.read_parquet(path, columns=['ano4', 'trimestre', 'pobre', 'pondih'])
+    validos = df.dropna(subset=['pobre', 'pondih']).copy()
     validos['semestre'] = np.where(validos['trimestre'].isin([1, 2]), 1, 2)
 
     registros = []
     for (ano, sem), subdf in validos.groupby(['ano4', 'semestre']):
         periodo = f"{ano}-S{sem}"
-        tasa_calculada = np.average(subdf['pobre']) * 100
+        tasa_calculada = np.average(subdf['pobre'], weights=subdf['pondih']) * 100
         indec_val = INDEC_HOGARES_OFICIAL.get(periodo, np.nan)
         dif = tasa_calculada - indec_val if not np.isnan(indec_val) else np.nan
 
@@ -48,7 +48,6 @@ def auditar_pobreza_hogares(parquet_path: str = "data/eph_hogares_consolidada_20
         return {
             "Escenario": nombre,
             "N_Semestres": len(pred),
-            "N_Comparables_INDEC": len(diffs),
             "Std_Predicciones": round(pred.std(), 3),
             "Media_Diferencia (Sesgo)": round(diffs.mean(), 3),
             "Std_Diferencias": round(diffs.std(), 3),
@@ -75,3 +74,12 @@ if __name__ == "__main__":
     
     print("\n--- COMPARACIÓN DE DESVIACIONES Y DISPERSIÓN ---")
     print(tabla_resumen.to_string(index=False))
+
+    # Guardar las tablas en archivos CSV
+    output_dir = Path("data") # O la carpeta que prefieras
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    tabla_semestres.to_csv(output_dir / "serie_pobreza_hogares.csv", index=False, encoding="utf-8-sig")
+    tabla_resumen.to_csv(output_dir / "resumen_metricas_pobreza.csv", index=False, encoding="utf-8-sig")
+    
+    print(f"\nArchivos CSV guardados exitosamente en: {output_dir.resolve()}")
