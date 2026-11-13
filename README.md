@@ -33,7 +33,6 @@ ProyectoCIAI/
 │   ├── serie_pobreza_hogares.csv                 # Auditoría semestral Target vs. INDEC
 │   └── resumen_metricas_pobreza.csv              # Resumen estadístico de desviaciones del Target
 ├── notebooks/
-│   ├── descarga.ipynb                            # Intento exploratorio de descarga vía pyeph
 │   ├── limpieza.py                               # Consolidación EPH + CBT y feature engineering
 │   ├── analisis_nans.py                          # Depuración residual de registros incompletos
 │   ├── analisis_target.py                        # Validación del target reconstruido vs. INDEC
