@@ -1,10 +1,10 @@
-Familia,Modelo,Regimen,Accuracy,Precision,Recall,Especificidad,F1-Score,F2-Score,PR-AUC,ROC-AUC,Brier-Score
-logistic,logistic_votacion_F2,A: Focalización (F2),0.7872,0.6009,0.8609,0.7557,0.7078,0.7923,0.7884,0.8911,0.1208
-logistic,logistic_votacion_sym50,B: Medición (p_cal>=0.50),0.823,0.8098,0.534,0.9464,0.6436,0.573,0.7884,0.8911,0.1257
-mlp,mlp_votacion_F2,A: Focalización (F2),0.789,0.6016,0.8732,0.753,0.7124,0.8009,0.8001,0.8973,0.1176
-mlp,mlp_votacion_sym50,B: Medición (p_cal>=0.50),0.8306,0.8146,0.562,0.9453,0.6651,0.5992,0.8001,0.8973,0.1208
-random_forest,random_forest_votacion_F2,A: Focalización (F2),0.7842,0.5948,0.876,0.7451,0.7085,0.8003,0.7963,0.8954,0.1179
-random_forest,random_forest_votacion_sym50,B: Medición (p_cal>=0.50),0.8234,0.8277,0.5177,0.954,0.637,0.5596,0.7964,0.8954,0.1236
-xgboost,xgboost_votacion_F2,A: Focalización (F2),0.7871,0.5983,0.8785,0.7481,0.7118,0.8033,0.8025,0.8987,0.1162
-xgboost,xgboost_votacion_sym50,B: Medición (p_cal>=0.50),0.831,0.8211,0.5565,0.9482,0.6634,0.5948,0.8025,0.8987,0.1208
-INTER-FAMILIA,super_ensamble_logit_sym50,B: Medición (p_cal>=0.50),0.8284,0.8222,0.5442,0.9497,0.6549,0.5837,0.8014,0.8986,0.1214
+Accuracy,Precision,Recall,Especificidad,F1-Score,F2-Score,PR-AUC,ROC-AUC,Brier-Score,Familia,Modelo,Regimen
+0.7872,0.6009,0.8609,0.7557,0.7078,0.7923,0.7884,0.8911,0.1208,logistic,logistic_votacion_F2,A: Focalización (F2)
+0.823,0.8098,0.534,0.9464,0.6436,0.573,0.7884,0.8911,0.1257,logistic,logistic_votacion_sym50,B: Medición (p_cal>=0.50)
+0.789,0.6016,0.8732,0.753,0.7124,0.8009,0.8001,0.8973,0.1176,mlp,mlp_votacion_F2,A: Focalización (F2)
+0.8306,0.8146,0.562,0.9453,0.6651,0.5992,0.8001,0.8973,0.1208,mlp,mlp_votacion_sym50,B: Medición (p_cal>=0.50)
+0.7842,0.5948,0.876,0.7451,0.7085,0.8003,0.7963,0.8954,0.1179,random_forest,random_forest_votacion_F2,A: Focalización (F2)
+0.8234,0.8277,0.5177,0.954,0.637,0.5596,0.7964,0.8954,0.1236,random_forest,random_forest_votacion_sym50,B: Medición (p_cal>=0.50)
+0.7871,0.5983,0.8785,0.7481,0.7118,0.8033,0.8025,0.8987,0.1162,xgboost,xgboost_votacion_F2,A: Focalización (F2)
+0.831,0.8211,0.5565,0.9482,0.6634,0.5948,0.8025,0.8987,0.1208,xgboost,xgboost_votacion_sym50,B: Medición (p_cal>=0.50)
+0.8284,0.8222,0.5442,0.9497,0.6549,0.5837,0.8014,0.8986,0.1214,INTER-FAMILIA,super_ensamble_logit_sym50,B: Medición (p_cal>=0.50)

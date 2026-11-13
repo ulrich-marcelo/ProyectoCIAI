@@ -4,14 +4,17 @@ PROYECTO: Predicción de Pobreza mediante Machine Learning (EPH 2016-2026)
 AUTOR: Marcelo Gabriel Ulrich | EEyN - UNSAM
 DIRECTORES: César Germán Santamaría | Agustín Moro
 ===============================================================================
-Módulo de Análisis Exploratorio de Datos (EDA) sobre Corpus Post-Limpieza:
-1. Anatomía del corpus (53 features por Dimensión Socioeconómica y Tipo) +
-   Contraste semestral Target Reconstruido (EPH) vs. INDEC Oficial (2016-2026).
-2. Ranking univariado de poder discriminativo: Information Value (IV) ponderado.
-3. Dimensión Demográfica: Tamaño del hogar, composición etaria y dependencia.
-4. Dimensiones Laboral y Capital Humano: Educación x Informalidad y Salud Pública.
-5. Dimensiones Hábitat y Regional: Brechas en 7 regiones y carencias habitacionales.
-6. Estructura de multicolinealidad (Spearman) agrupada por Dimensión Conceptual.
+Módulo de Análisis Exploratorio de Datos (EDA) sobre Corpus Post-Limpieza
+(Versión con figuras individuales de alta legibilidad para informe/LaTeX):
+1a. Anatomía del corpus (53 features por Dimensión Socioeconómica y Tipo).
+1b. Contraste semestral Target Reconstruido (EPH) vs. INDEC Oficial (2016-2026).
+2.  Ranking univariado de poder discriminativo: Information Value (IV) ponderado.
+3a. Dimensión Demográfica: Tamaño del hogar y composición etaria.
+3b. Dimensión Demográfica: Gradiente por dependencia económica inter-período.
+4a. Dimensiones Laboral y Capital Humano: Heatmap Educación x Informalidad.
+4b. Dimensiones Laboral y Capital Humano: Cobertura de Salud Pública x Jefe/a.
+5a. Dimensión Regional: Brechas de pobreza en 7 regiones estadísticas.
+5b. Dimensión Hábitat: Tasa de pobreza según carencias habitacionales.
 ===============================================================================
 """
 
@@ -250,14 +253,13 @@ print(f"      ✓ Registros válidos: {len(df):,} hogares | Features analizadas:
 
 
 # -----------------------------------------------------------------------------
-# FIGURA 1: ANATOMÍA DEL CORPUS (53 FEATURES) + TARGET APROXIMADO VS INDEC
+# FIGURA 1 (INDIVIDUALES): ANATOMÍA DEL CORPUS + TARGET APROXIMADO VS INDEC
 # -----------------------------------------------------------------------------
 def generar_fig1_anatomia_y_serie(df_all: pd.DataFrame, feat_list: List[str]):
-    print("[2/7] Generando Figura 1: Anatomía del corpus y contraste semestral Target vs. INDEC...")
-    fig, axes = plt.subplots(1, 2, figsize=(16, 5.5), gridspec_kw={"width_ratios": [1.0, 1.4]})
+    print("[2/7] Generando Figuras 1a y 1b (individuales): Anatomía del corpus y serie semestral...")
 
-    # Panel A: Composición de las 53 features por Dimensión Socioeconómica y Tipo
-    ax0 = axes[0]
+    # --- FIGURA 1a: Composición de las 53 features por Dimensión Socioeconómica y Tipo ---
+    fig, ax0 = plt.subplots(figsize=(9.5, 5.5))
     rows_comp = [{"Dimension": VAR_TO_DIM[f], "Tipo": clasificar_tipo_estadistico(f)} for f in feat_list]
     df_comp = pd.DataFrame(rows_comp)
     ct = pd.crosstab(df_comp["Dimension"], df_comp["Tipo"])
@@ -277,19 +279,23 @@ def generar_fig1_anatomia_y_serie(df_all: pd.DataFrame, feat_list: List[str]):
     ct = ct.reindex(index=orden_dims, columns=[c for c in orden_tipos if c in ct.columns], fill_value=0)
 
     colores_tipos = ["#4e79a7", "#f28e2b", "#59a14f", "#e15759"]
-    ct.plot(kind="barh", stacked=True, ax=ax0, color=colores_tipos, edgecolor="white", width=0.68)
+    ct.plot(kind="barh", stacked=True, ax=ax0, color=colores_tipos, edgecolor="white", width=0.65)
     ax0.invert_yaxis()
-    ax0.set_title("A. Composición de las 53 Features por Dimensión y Tipo", fontweight="bold", pad=10)
-    ax0.set_xlabel("Cantidad de Variables")
+    ax0.set_title("Composición de las 53 Features por Dimensión y Tipo Estadístico", fontweight="bold", pad=12)
+    ax0.set_xlabel("Cantidad de Variables", fontweight="bold")
     ax0.set_ylabel("")
-    ax0.set_xlim(0, 36)
-    ax0.legend(title="Tipo Estadístico", loc="lower right", fontsize=8.5, title_fontsize=9)
+    ax0.set_xlim(0, 36.5)
+    ax0.legend(title="Tipo Estadístico", loc="lower right", fontsize=9, title_fontsize=9.5, frameon=True)
 
     for idx, total in enumerate(ct.sum(axis=1)):
-        ax0.text(total + 0.6, idx, f"{int(total)} vars ({total/len(feat_list)*100:.1f}%)", va="center", fontsize=9, fontweight="bold")
+        ax0.text(total + 0.6, idx, f"{int(total)} vars ({total/len(feat_list)*100:.1f}%)", va="center", fontsize=9.5, fontweight="bold")
 
-    # Panel B: Serie semestral Target Aproximado (EPH PONDIH) vs. INDEC Oficial
-    ax1 = axes[1]
+    plt.tight_layout()
+    plt.savefig(OUTPUT_FIGS / "eda_01a_composicion_corpus_dimensiones.png", dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+    # --- FIGURA 1b: Serie semestral Target Aproximado (EPH PONDIH) vs. INDEC Oficial ---
+    fig, ax1 = plt.subplots(figsize=(10.5, 5.5))
     res_sem = []
     for (ano, sem), sub in df_all.groupby(["ano4", "semestre"]):
         per = f"{ano}-S{sem}"
@@ -309,24 +315,24 @@ def generar_fig1_anatomia_y_serie(df_all: pd.DataFrame, feat_list: List[str]):
 
     ax1.plot(
         df_s.index, df_s["indec_oficial_pct"],
-        marker="s", markersize=5.5, lw=2.2, linestyle="--", color="black",
+        marker="s", markersize=6, lw=2.2, linestyle="--", color="black",
         label="INDEC Oficial (Hogares)"
     )
     ax1.plot(
         df_s.index, df_s["target_eph_pct"],
-        marker="o", markersize=5.5, lw=2.2, color="#c0392b",
+        marker="o", markersize=6, lw=2.2, color="#c0392b",
         label="Target Reconstruido (EPH PONDIH)"
     )
 
     ax1.set_xticks(range(0, len(df_s), 2))
-    ax1.set_xticklabels(df_s["periodo"].iloc[::2], rotation=40, ha="right", fontsize=8.5)
+    ax1.set_xticklabels(df_s["periodo"].iloc[::2], rotation=40, ha="right", fontsize=9)
     ax1.set_ylabel("Tasa de Pobreza en Hogares (%)", fontweight="bold")
-    ax1.set_title("B. Validación del Target Reconstruido frente a INDEC Oficial (Semestral)", fontweight="bold", pad=10)
+    ax1.set_title("Validación del Target Reconstruido frente a INDEC Oficial (Semestral)", fontweight="bold", pad=12)
     ax1.set_ylim(14, 47)
-    ax1.legend(loc="upper left", fontsize=8.5, frameon=True)
+    ax1.legend(loc="upper left", fontsize=9, frameon=True)
 
     plt.tight_layout()
-    plt.savefig(OUTPUT_FIGS / "eda_01_composicion_corpus_dimensiones.png", dpi=300, bbox_inches="tight")
+    plt.savefig(OUTPUT_FIGS / "eda_01b_serie_target_vs_indec.png", dpi=300, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -377,7 +383,7 @@ def generar_fig2_ranking_iv_y_tabla(df_all: pd.DataFrame, feat_list: List[str]) 
     colores = [PALETA_DIMENSIONES[d] for d in top20["dimension"]]
     labels = [f"{row['etiqueta']} {row['direccion']}" for _, row in top20.iterrows()]
 
-    fig, ax = plt.subplots(figsize=(12, 7.5))
+    fig, ax = plt.subplots(figsize=(11.5, 7.5))
     bars = ax.barh(labels, top20["IV_ponderado"], color=colores, edgecolor="white", height=0.72)
 
     ax.axvline(0.10, color="#7f8c8d", linestyle=":", lw=1.2)
@@ -401,15 +407,14 @@ def generar_fig2_ranking_iv_y_tabla(df_all: pd.DataFrame, feat_list: List[str]) 
 
 
 # -----------------------------------------------------------------------------
-# FIGURA 3: DIMENSIÓN 1 — ESTRUCTURA DEMOGRÁFICA Y CARGA FAMILIAR
+# FIGURA 3 (INDIVIDUALES): DIMENSIÓN 1 — ESTRUCTURA DEMOGRÁFICA Y CARGA FAMILIAR
 # -----------------------------------------------------------------------------
 def generar_fig3_demografia(df_all: pd.DataFrame):
-    print("[4/7] Generando Figura 3: Estructura demográfica por tamaño y composición etaria...")
-    fig, axes = plt.subplots(1, 2, figsize=(16, 5.6), gridspec_kw={"width_ratios": [1.15, 1.0]})
-
-    # Panel A: Barras agrupadas por Tramo de Tamaño x Composición Etaria clara
-    ax0 = axes[0]
+    print("[4/7] Generando Figuras 3a y 3b (individuales): Estructura demográfica y carga familiar...")
     df_d = df_all.copy()
+
+    # --- FIGURA 3a: Barras agrupadas por Tramo de Tamaño x Composición Etaria ---
+    fig, ax0 = plt.subplots(figsize=(10, 5.8))
 
     df_d["tramo_tamano"] = pd.cut(
         df_d["cant_miembros"],
@@ -465,15 +470,19 @@ def generar_fig3_demografia(df_all: pd.DataFrame):
     )
     ax0.set_xlabel("")
     ax0.set_ylabel("Tasa de Pobreza (% PONDIH)", fontweight="bold")
-    ax0.set_title("A. Pobreza según Tamaño y Composición Etaria del Hogar", fontweight="bold", pad=10)
-    ax0.legend(title="Composición Etaria del Hogar", loc="upper left", fontsize=8.3, frameon=True)
+    ax0.set_title("Pobreza según Tamaño y Composición Etaria del Hogar", fontweight="bold", pad=12)
+    ax0.legend(title="Composición Etaria del Hogar", loc="upper left", fontsize=8.8, frameon=True)
     ax0.set_ylim(0, 68)
 
     for container in ax0.containers:
-        ax0.bar_label(container, fmt="%.1f%%", fontsize=7.5, padding=2)
+        ax0.bar_label(container, fmt="%.1f%%", fontsize=8, padding=2)
 
-    # Panel B: Ratio de Dependencia Económica (Miembros / Ocupados) por Macro-Período
-    ax1 = axes[1]
+    plt.tight_layout()
+    plt.savefig(OUTPUT_FIGS / "eda_03a_demografia_tamano_composicion.png", dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+    # --- FIGURA 3b: Ratio de Dependencia Económica (Miembros / Ocupados) por Macro-Período ---
+    fig, ax1 = plt.subplots(figsize=(9.5, 5.5))
     bins_dep = [0.99, 1.0, 1.5, 2.0, 3.0, 4.0, 999.0]
     labels_dep = ["1.0\n(Todos ocup.)", "1.01–1.5", "1.51–2.0", "2.01–3.0", "3.01–4.0", ">4.0 / Sin\nocupados"]
     df_d["tramo_dep_econ"] = pd.cut(df_d["ratio_dependencia_econom"], bins=bins_dep, labels=labels_dep)
@@ -487,26 +496,24 @@ def generar_fig3_demografia(df_all: pd.DataFrame):
         for lbl in labels_dep:
             s_l = sub_b[sub_b["tramo_dep_econ"] == lbl]
             vals_y.append(weighted_mean(s_l["pobre"].values, s_l["pondih"].values) * 100.0)
-        ax1.plot(labels_dep, vals_y, marker=marker, markersize=6, lw=2.3, color=color, label=bloque)
+        ax1.plot(labels_dep, vals_y, marker=marker, markersize=6.5, lw=2.4, color=color, label=bloque)
 
     ax1.set_xlabel("Ratio de Dependencia Económica (Miembros / Ocupados)", fontweight="bold")
     ax1.set_ylabel("Tasa de Pobreza (% PONDIH)", fontweight="bold")
-    ax1.set_title("B. Gradiente por Carga Económica y Estabilidad Inter-Período", fontweight="bold", pad=10)
-    ax1.legend(loc="upper left", fontsize=9, frameon=True)
+    ax1.set_title("Gradiente por Carga Económica y Estabilidad Inter-Período", fontweight="bold", pad=12)
+    ax1.legend(loc="upper left", fontsize=9.5, frameon=True)
     ax1.set_ylim(0, 72)
 
     plt.tight_layout()
-    plt.savefig(OUTPUT_FIGS / "eda_03_demografia_y_carga_familiar.png", dpi=300, bbox_inches="tight")
+    plt.savefig(OUTPUT_FIGS / "eda_03b_gradiente_dependencia_economica.png", dpi=300, bbox_inches="tight")
     plt.close(fig)
 
 
 # -----------------------------------------------------------------------------
-# FIGURA 4: DIMENSIONES 2 Y 3 — INTERACCIÓN LABORAL, EDUCACIÓN Y SALUD PÚBLICA
+# FIGURA 4 (INDIVIDUALES): DIMENSIONES 2 Y 3 — LABORAL, EDUCACIÓN Y SALUD PÚBLICA
 # -----------------------------------------------------------------------------
 def generar_fig4_laboral_y_capital_humano(df_all: pd.DataFrame):
-    print("[5/7] Generando Figura 4: Interacción Educación x Informalidad y Salud Pública...")
-    fig, axes = plt.subplots(1, 2, figsize=(16, 5.6), gridspec_kw={"width_ratios": [1.15, 1.0]})
-
+    print("[5/7] Generando Figuras 4a y 4b (individuales): Educación x Informalidad y Salud Pública...")
     df_lc = df_all.copy()
     educ_map = {
         1: "1. Primaria Inc./S.Inst.",
@@ -529,7 +536,8 @@ def generar_fig4_laboral_y_capital_humano(df_all: pd.DataFrame):
         labels=["0% (Todo Formal)", "1%–50% (Mixto)", "51%–99% (Mayoría Inf.)", "100% (Todo Informal)"]
     )
 
-    # Panel A: Heatmap Educación x Informalidad
+    # --- FIGURA 4a: Heatmap Educación x Informalidad ---
+    fig, ax0 = plt.subplots(figsize=(9.5, 6.0))
     pivot_ht = pd.DataFrame(
         index=orden_educ,
         columns=["0% (Todo Formal)", "1%–50% (Mixto)", "51%–99% (Mayoría Inf.)", "100% (Todo Informal)"],
@@ -543,14 +551,19 @@ def generar_fig4_laboral_y_capital_humano(df_all: pd.DataFrame):
 
     sns.heatmap(
         pivot_ht, annot=True, fmt=".1f", cmap="YlOrRd", cbar_kws={"label": "Pobreza (% PONDIH)"},
-        ax=axes[0], linewidths=0.8, linecolor="white"
+        ax=ax0, linewidths=0.8, linecolor="white", annot_kws={"size": 10, "weight": "bold"}
     )
-    axes[0].set_title("A. Interacción Capital Humano × Informalidad Laboral (% Pobreza)", fontweight="bold", pad=10)
-    axes[0].set_xlabel("Tasa de Informalidad de Asalariados en el Hogar", fontweight="bold")
-    axes[0].set_ylabel("Máximo Nivel Educativo de Adultos del Hogar", fontweight="bold")
-    axes[0].tick_params(axis="x", rotation=18)
+    ax0.set_title("Interacción Capital Humano × Informalidad Laboral (% Pobreza)", fontweight="bold", pad=12)
+    ax0.set_xlabel("Tasa de Informalidad de Asalariados en el Hogar", fontweight="bold")
+    ax0.set_ylabel("Máximo Nivel Educativo de Adultos del Hogar", fontweight="bold")
+    ax0.tick_params(axis="x", rotation=15)
 
-    # Panel B: Cobertura de Salud Pública x Condición Ocupacional del Jefe/a
+    plt.tight_layout()
+    plt.savefig(OUTPUT_FIGS / "eda_04a_interaccion_educacion_informalidad.png", dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+    # --- FIGURA 4b: Cobertura de Salud Pública x Condición Ocupacional del Jefe/a ---
+    fig, ax1 = plt.subplots(figsize=(10, 5.8))
     cond_jefe = [
         (df_lc["jefe_desocupado"] == 1),
         (df_lc["jefe_ocupado"] == 1) & (df_lc["jefe_informal"] == 1),
@@ -583,27 +596,30 @@ def generar_fig4_laboral_y_capital_humano(df_all: pd.DataFrame):
 
     sns.barplot(
         data=df_salud_plot, x="Cobertura Salud", y="Pobreza (%)", hue="Condición Jefe",
-        palette=["#c0392b", "#e67e22", "#2980b9", "#7f8c8d"], ax=axes[1]
+        palette=["#c0392b", "#e67e22", "#2980b9", "#7f8c8d"], ax=ax1
     )
-    axes[1].set_title("B. Cobertura de Salud Pública como Proxy de Precariedad", fontweight="bold", pad=10)
-    axes[1].set_xlabel("")
-    axes[1].set_ylabel("Tasa de Pobreza (% PONDIH)", fontweight="bold")
-    axes[1].set_ylim(0, 72)
-    axes[1].legend(title="Inserción del Jefe/a", loc="upper left", fontsize=8.5, frameon=True)
+    ax1.set_title("Cobertura de Salud Pública como Proxy de Precariedad Laboral", fontweight="bold", pad=12)
+    ax1.set_xlabel("")
+    ax1.set_ylabel("Tasa de Pobreza (% PONDIH)", fontweight="bold")
+    ax1.set_ylim(0, 74)
+    ax1.legend(title="Inserción del Jefe/a", loc="upper left", fontsize=9, frameon=True)
+
+    for container in ax1.containers:
+        ax1.bar_label(container, fmt="%.1f%%", fontsize=8, padding=2)
 
     plt.tight_layout()
-    plt.savefig(OUTPUT_FIGS / "eda_04_laboral_y_capital_humano.png", dpi=300, bbox_inches="tight")
+    plt.savefig(OUTPUT_FIGS / "eda_04b_cobertura_salud_publica_jefe.png", dpi=300, bbox_inches="tight")
     plt.close(fig)
 
 
 # -----------------------------------------------------------------------------
-# FIGURA 5: DIMENSIONES 4 Y 5 — BRECHAS REGIONALES Y CARENCIAS HABITACIONALES
+# FIGURA 5 (INDIVIDUALES): DIMENSIONES 4 Y 5 — BRECHAS REGIONALES Y HÁBITAT
 # -----------------------------------------------------------------------------
 def generar_fig5_regional_y_habitat(df_all: pd.DataFrame):
-    print("[6/7] Generando Figura 5: Brechas regionales y tasas comparativas de hábitat...")
-    fig, axes = plt.subplots(1, 2, figsize=(16, 5.8), gridspec_kw={"width_ratios": [1.0, 1.25]})
+    print("[6/7] Generando Figuras 5a y 5b (individuales): Brechas regionales y carencias habitacionales...")
 
-    # Panel A: Pobreza por Región (7 zonas) comparando Desarrollo vs OOS
+    # --- FIGURA 5a: Pobreza por Región (7 zonas) comparando Desarrollo vs OOS ---
+    fig, ax0 = plt.subplots(figsize=(10, 5.8))
     reg_rows = []
     for reg, sub_r in df_all.groupby("region_estudio"):
         for blq in ["Desarrollo (2016–2021)", "Out-of-Sample (2022–2026)"]:
@@ -624,16 +640,24 @@ def generar_fig5_regional_y_habitat(df_all: pd.DataFrame):
 
     sns.barplot(
         data=df_reg, x="Región", y="Pobreza (%)", hue="Período",
-        order=orden_reg, palette=["#5d6d7e", "#c0392b"], ax=axes[0]
+        order=orden_reg, palette=["#5d6d7e", "#c0392b"], ax=ax0
     )
-    axes[0].set_title("A. Incidencia de Pobreza por Región Estadística (7 Zonas)", fontweight="bold", pad=10)
-    axes[0].set_xlabel("")
-    axes[0].set_ylabel("Tasa de Pobreza (% PONDIH)", fontweight="bold")
-    axes[0].tick_params(axis="x", rotation=25)
-    axes[0].set_ylim(0, 45)
-    axes[0].legend(title="Bloque Temporal", loc="upper right", fontsize=8.5, frameon=True)
+    ax0.set_title("Incidencia de Pobreza por Región Estadística (7 Zonas)", fontweight="bold", pad=12)
+    ax0.set_xlabel("")
+    ax0.set_ylabel("Tasa de Pobreza (% PONDIH)", fontweight="bold")
+    ax0.tick_params(axis="x", rotation=22)
+    ax0.set_ylim(0, 46)
+    ax0.legend(title="Bloque Temporal", loc="upper right", fontsize=9, frameon=True)
 
-    # Panel B: Tasa de pobreza Con Carencia vs Sin Carencia
+    for container in ax0.containers:
+        ax0.bar_label(container, fmt="%.1f%%", fontsize=8, padding=2)
+
+    plt.tight_layout()
+    plt.savefig(OUTPUT_FIGS / "eda_05a_incidencia_pobreza_regional.png", dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+    # --- FIGURA 5b: Tasa de pobreza Con Carencia vs Sin Carencia ---
+    fig, ax1 = plt.subplots(figsize=(10.5, 6.2))
     indicadores_habitat = [
         ("Vivienda en Villa de Emergencia (iv12_3=1)", df_all["iv12_3"] == 1),
         ("Hacinamiento Crítico (>3 pers/cuarto)", df_all["hacinamiento_critico"] == 1),
@@ -660,7 +684,6 @@ def generar_fig5_regional_y_habitat(df_all: pd.DataFrame):
         })
 
     df_hab = pd.DataFrame(hab_rows).sort_values("Pobreza_Con", ascending=True).reset_index(drop=True)
-    ax1 = axes[1]
     y_pos = np.arange(len(df_hab))
     height = 0.36
 
@@ -671,27 +694,24 @@ def generar_fig5_regional_y_habitat(df_all: pd.DataFrame):
         ax1.text(
             row["Pobreza_Con"] + 0.8, idx + height / 2,
             f"{row['Pobreza_Con']:.1f}%",
-            va="center", fontsize=8.3, fontweight="bold", color="#5d3a33"
+            va="center", fontsize=8.5, fontweight="bold", color="#5d3a33"
         )
         ax1.text(
             row["Pobreza_Sin"] + 0.8, idx - height / 2,
             f"{row['Pobreza_Sin']:.1f}%",
-            va="center", fontsize=8.0, color="#555555"
+            va="center", fontsize=8.2, color="#555555"
         )
 
     ax1.set_yticks(y_pos)
-    ax1.set_yticklabels(df_hab["Indicador"], fontsize=8.8)
+    ax1.set_yticklabels(df_hab["Indicador"], fontsize=9)
     ax1.set_xlabel("Tasa de Pobreza (% PONDIH)", fontweight="bold")
-    ax1.set_title("B. Tasa de Pobreza según Privación Habitacional", fontweight="bold", pad=10)
+    ax1.set_title("Tasa de Pobreza según Privación Habitacional", fontweight="bold", pad=12)
     ax1.set_xlim(0, df_hab["Pobreza_Con"].max() * 1.18)
-    ax1.legend(loc="lower right", fontsize=8.5, frameon=True)
+    ax1.legend(loc="lower right", fontsize=9, frameon=True)
 
     plt.tight_layout()
-    plt.savefig(OUTPUT_FIGS / "eda_05_habitat_y_contexto_regional.png", dpi=300, bbox_inches="tight")
+    plt.savefig(OUTPUT_FIGS / "eda_05b_privacion_habitacional.png", dpi=300, bbox_inches="tight")
     plt.close(fig)
-
-
-
 
 
 # -----------------------------------------------------------------------------
@@ -703,9 +723,9 @@ if __name__ == "__main__":
     generar_fig3_demografia(df)
     generar_fig4_laboral_y_capital_humano(df)
     generar_fig5_regional_y_habitat(df)
-    
+
     print("\n" + "=" * 75)
-    print("✓ EDA COMPLETADO CON ÉXITO.")
+    print("✓ EDA COMPLETADO CON ÉXITO (9 FIGURAS INDIVIDUALES EXPORTADAS).")
     print(f"  - Figuras guardadas en: {OUTPUT_FIGS.resolve()}")
     print(f"  - Tablas guardadas en:  {OUTPUT_TABLES.resolve()}")
     print("\nTop 10 Variables por Information Value (IV Ponderado):")
