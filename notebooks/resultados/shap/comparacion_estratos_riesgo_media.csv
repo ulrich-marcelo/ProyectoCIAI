@@ -1,0 +1,6 @@
+dimension,1_Nucleo_Duro_Structural (p_cal>=0.50),2_Franja_Vulnerable (0.12<=p_cal<0.50),3_Hogares_Integrados (p_cal<0.12)
+Capital Humano y Salud,0.1013,0.0109,-0.0848
+Contexto Regional,0.016,0.008,-0.0026
+Estructura Demográfica,0.1846,-0.0808,-0.1529
+Hábitat y Calidad Habitacional,0.0482,-0.0132,-0.0328
+Inserción Laboral,0.0716,0.0207,-0.0307

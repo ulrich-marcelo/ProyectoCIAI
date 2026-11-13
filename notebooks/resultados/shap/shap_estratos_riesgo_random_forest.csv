@@ -1,0 +1,16 @@
+familia,estrato,n_hogares_muestra,dimension,empuje_neto_prob_cal,magnitud_abs_prob_cal,peso_relativo_pct
+random_forest,1_Nucleo_Duro_Structural (p_cal>=0.50),328,Hábitat y Calidad Habitacional,0.0408,0.0476,13.8
+random_forest,1_Nucleo_Duro_Structural (p_cal>=0.50),328,Capital Humano y Salud,0.0956,0.1064,30.86
+random_forest,1_Nucleo_Duro_Structural (p_cal>=0.50),328,Inserción Laboral,0.057,0.0627,18.18
+random_forest,1_Nucleo_Duro_Structural (p_cal>=0.50),328,Estructura Demográfica,0.1018,0.1196,34.67
+random_forest,1_Nucleo_Duro_Structural (p_cal>=0.50),328,Contexto Regional,-0.0021,0.0086,2.49
+random_forest,2_Franja_Vulnerable (0.12<=p_cal<0.50),485,Hábitat y Calidad Habitacional,-0.026,0.1897,16.43
+random_forest,2_Franja_Vulnerable (0.12<=p_cal<0.50),485,Capital Humano y Salud,-0.1026,0.3741,32.41
+random_forest,2_Franja_Vulnerable (0.12<=p_cal<0.50),485,Inserción Laboral,-0.0682,0.224,19.4
+random_forest,2_Franja_Vulnerable (0.12<=p_cal<0.50),485,Estructura Demográfica,0.0636,0.3428,29.69
+random_forest,2_Franja_Vulnerable (0.12<=p_cal<0.50),485,Contexto Regional,-0.0085,0.0239,2.07
+random_forest,3_Hogares_Integrados (p_cal<0.12),987,Hábitat y Calidad Habitacional,-0.0399,0.0454,9.78
+random_forest,3_Hogares_Integrados (p_cal<0.12),987,Capital Humano y Salud,-0.1355,0.1374,29.63
+random_forest,3_Hogares_Integrados (p_cal<0.12),987,Inserción Laboral,-0.0293,0.0782,16.86
+random_forest,3_Hogares_Integrados (p_cal<0.12),987,Estructura Demográfica,-0.1947,0.1977,42.63
+random_forest,3_Hogares_Integrados (p_cal<0.12),987,Contexto Regional,-0.0013,0.0051,1.1

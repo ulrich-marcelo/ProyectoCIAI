@@ -1,0 +1,6 @@
+dimension,logistic,mlp,random_forest,xgboost
+Capital Humano y Salud,13.76,20.11,31.01,21.54
+Contexto Regional,7.83,5.01,1.68,7.39
+Estructura Demográfica,45.47,41.47,35.95,36.7
+Hábitat y Calidad Habitacional,9.99,8.49,13.21,12.11
+Inserción Laboral,22.95,24.92,18.15,22.26

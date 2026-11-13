@@ -1,0 +1,16 @@
+familia,estrato,n_hogares_muestra,dimension,empuje_neto_prob_cal,magnitud_abs_prob_cal,peso_relativo_pct
+mlp,1_Nucleo_Duro_Structural (p_cal>=0.50),374,Hábitat y Calidad Habitacional,0.0467,0.0666,10.71
+mlp,1_Nucleo_Duro_Structural (p_cal>=0.50),374,Capital Humano y Salud,0.1202,0.137,22.05
+mlp,1_Nucleo_Duro_Structural (p_cal>=0.50),374,Inserción Laboral,0.0692,0.1477,23.76
+mlp,1_Nucleo_Duro_Structural (p_cal>=0.50),374,Estructura Demográfica,0.1756,0.2346,37.74
+mlp,1_Nucleo_Duro_Structural (p_cal>=0.50),374,Contexto Regional,0.0119,0.0357,5.75
+mlp,2_Franja_Vulnerable (0.12<=p_cal<0.50),403,Hábitat y Calidad Habitacional,-0.0088,0.0556,10.11
+mlp,2_Franja_Vulnerable (0.12<=p_cal<0.50),403,Capital Humano y Salud,-0.0112,0.107,19.46
+mlp,2_Franja_Vulnerable (0.12<=p_cal<0.50),403,Inserción Laboral,0.0114,0.1478,26.87
+mlp,2_Franja_Vulnerable (0.12<=p_cal<0.50),403,Estructura Demográfica,-0.0732,0.2007,36.5
+mlp,2_Franja_Vulnerable (0.12<=p_cal<0.50),403,Contexto Regional,0.0014,0.0388,7.06
+mlp,3_Hogares_Integrados (p_cal<0.12),1023,Hábitat y Calidad Habitacional,-0.0208,0.0319,6.95
+mlp,3_Hogares_Integrados (p_cal<0.12),1023,Capital Humano y Salud,-0.0876,0.0896,19.55
+mlp,3_Hogares_Integrados (p_cal<0.12),1023,Inserción Laboral,-0.0297,0.113,24.65
+mlp,3_Hogares_Integrados (p_cal<0.12),1023,Estructura Demográfica,-0.1894,0.2058,44.93
+mlp,3_Hogares_Integrados (p_cal<0.12),1023,Contexto Regional,-0.0051,0.018,3.92

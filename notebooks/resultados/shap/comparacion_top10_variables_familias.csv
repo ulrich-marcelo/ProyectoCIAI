@@ -1,0 +1,11 @@
+,LOGISTIC,RANDOM_FOREST,XGBOOST,MLP
+#1,Adultos Equivalentes del Hogar (31.3%),Prop. Cobertura Salud Pública Exclusiva (16.8%),Adultos Equivalentes del Hogar (12.4%),Adultos Equivalentes del Hogar (21.0%)
+#2,Cantidad de Asalariados (11.4%),Ratio de Dependencia Económica (14.5%),Ratio de Dependencia Económica (10.8%),Prop. Cobertura Salud Pública Exclusiva (8.5%)
+#3,Prop. Cobertura Salud Pública Exclusiva (8.6%),Adultos Equivalentes del Hogar (8.4%),Prop. Cobertura Salud Pública Exclusiva (10.1%),Cantidad de Asalariados (8.1%)
+#4,Cantidad de Adultos Mayores (7.2%),Cantidad de Asalariados (6.4%),Cantidad de Asalariados (10.1%),Cantidad de Adultos Mayores (6.8%)
+#5,Cantidad de Trabajadores Informales (6.5%),Combustible Utilizado (General) (5.3%),Cantidad de Adultos Mayores (6.3%),Cantidad de Trabajadores Informales (6.1%)
+#6,Región Estadística (5.8%),Máximo Nivel Educativo del Hogar (4.5%),Tasa de Informalidad Laboral del Hogar (5.4%),Cantidad de Ocupados (5.4%)
+#7,Tamaño del Hogar (Miembros) (5.1%),Cantidad de Adultos Mayores (4.0%),Región Estadística (4.3%),Cantidad de Económicamente Activos (5.2%)
+#8,Cantidad de Ocupados (2.9%),Tasa de Informalidad Laboral del Hogar (3.9%),Cantidad de Ocupados (3.5%),Nivel Educativo del Jefe/a (3.2%)
+#9,Ratio de Dependencia Económica (2.1%),Cantidad de Ocupados (3.8%),Edad del Jefe/a de Hogar (3.3%),Región Estadística (2.8%)
+#10,Nivel Educativo del Jefe/a (2.0%),Edad del Jefe/a de Hogar (3.7%),Nivel Educativo del Jefe/a (2.8%),Jefatura de Hogar Femenina (2.4%)
