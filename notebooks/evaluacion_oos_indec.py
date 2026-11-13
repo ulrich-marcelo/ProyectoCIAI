@@ -174,6 +174,129 @@ def graficar_matrices_confusion_pre_calibracion(
         
     return rutas_generadas
 
+def graficar_matrices_confusion_post_calibracion(
+    dfs_familia: Dict[str, pd.DataFrame],
+    y_true: np.ndarray,
+    sample_weight: Optional[np.ndarray],
+    out_dir: Path,
+    df_super: Optional[pd.DataFrame] = None
+) -> List[Path]:
+    rutas_generadas = []
+    etiquetas = ["No Pobre (0)", "Pobre (1)"]
+    nota_peso = "Ponderada por PONDIH" if sample_weight is not None else "Sin ponderar"
+
+    # Construir lista de modelos a graficar (4 familias + super-ensamble si existe)
+    modelos_a_graficar = []
+    for fam, df_f in dfs_familia.items():
+        col_pred = f"pred_{fam}_votacion_sym50"
+        if col_pred in df_f.columns:
+            modelos_a_graficar.append((fam, fam.upper(), df_f[col_pred].values.astype(int)))
+
+    if df_super is not None and "pred_super_ensamble_sym50" in df_super.columns:
+        modelos_a_graficar.append(
+            ("super_ensamble", "SUPER-ENSAMBLE", df_super["pred_super_ensamble_sym50"].values.astype(int))
+        )
+
+    datos_grilla = []
+
+    for clave, titulo_fam, y_pred_cal in modelos_a_graficar:
+        fig, ax = plt.subplots(figsize=(6, 5), dpi=300)
+        cm = confusion_matrix(y_true, y_pred_cal, sample_weight=sample_weight)
+        cm_norm = cm.astype(np.float64) / np.maximum(cm.sum(axis=1, keepdims=True), 1.0) * 100.0
+
+        tn, fp, fn, tp = cm.ravel()
+        acc = (tp + tn) / max(tp + tn + fp + fn, 1.0)
+        prec = tp / max(tp + fp, 1.0)
+        rec = tp / max(tp + fn, 1.0)
+        esp = tn / max(tn + fp, 1.0)
+
+        if clave != "super_ensamble":
+            datos_grilla.append((titulo_fam, cm, cm_norm, acc, prec, rec, esp))
+
+        im = ax.imshow(cm_norm, interpolation="nearest", cmap="Blues", vmin=0, vmax=100)
+        cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        cbar.ax.tick_params(labelsize=8)
+        cbar.set_label("% por clase real", fontsize=8)
+
+        ax.set_xticks([0, 1])
+        ax.set_yticks([0, 1])
+        ax.set_xticklabels(etiquetas, fontsize=9)
+        ax.set_yticklabels(etiquetas, fontsize=9)
+        ax.set_xlabel("Predicción Recalibrada (Régimen B: p_cal >= 0.50)", fontsize=9, fontweight="bold")
+        ax.set_ylabel("Clase Real (EPH)", fontsize=9, fontweight="bold")
+
+        ax.set_title(
+            f"{titulo_fam} - Matriz Post-Calibración ({nota_peso})\n"
+            f"Acc: {acc:.1%} | Prec: {prec:.1%} | Rec: {rec:.1%} | Espec: {esp:.1%}",
+            fontsize=10,
+            fontweight="bold",
+            pad=10
+        )
+
+        for i in range(2):
+            for j in range(2):
+                valor_abs = cm[i, j]
+                valor_pct = cm_norm[i, j]
+                color_txt = "white" if valor_pct > 55.0 else "black"
+                texto_celda = f"{valor_pct:.1f}%\n({valor_abs:,.0f})"
+                ax.text(
+                    j, i, texto_celda,
+                    ha="center", va="center",
+                    color=color_txt, fontsize=9.5, fontweight="bold"
+                )
+
+        plt.tight_layout()
+        fpath = out_dir / f"matriz_confusion_post_cal_{clave}.png"
+        plt.savefig(fpath, bbox_inches="tight")
+        plt.close()
+        rutas_generadas.append(fpath)
+
+    # Grilla combinada 2x2 de las 4 familias (compatibilidad directa con LaTeX)
+    if len(datos_grilla) >= 4:
+        fig, axes = plt.subplots(2, 2, figsize=(11.5, 9.5), dpi=300)
+        for idx, (titulo_fam, cm, cm_norm, acc, prec, rec, esp) in enumerate(datos_grilla[:4]):
+            ax = axes.flatten()[idx]
+            ax.imshow(cm_norm, interpolation="nearest", cmap="Blues", vmin=0, vmax=100)
+            ax.set_xticks([0, 1])
+            ax.set_yticks([0, 1])
+            ax.set_xticklabels(etiquetas, fontsize=9)
+            ax.set_yticklabels(etiquetas, fontsize=9)
+            ax.set_xlabel("Predicción (p_cal >= 0.50)", fontsize=9, fontweight="bold")
+            if idx % 2 == 0:
+                ax.set_ylabel("Clase Real (EPH)", fontsize=9, fontweight="bold")
+
+            ax.set_title(
+                f"{titulo_fam}\nAcc: {acc:.1%} | Prec: {prec:.1%} | Rec: {rec:.1%} | Espec: {esp:.1%}",
+                fontsize=9.5,
+                fontweight="bold",
+                pad=8
+            )
+
+            for i in range(2):
+                for j in range(2):
+                    valor_abs = cm[i, j]
+                    valor_pct = cm_norm[i, j]
+                    color_txt = "white" if valor_pct > 55.0 else "black"
+                    ax.text(
+                        j, i, f"{valor_pct:.1f}%\n({valor_abs:,.0f})",
+                        ha="center", va="center",
+                        color=color_txt, fontsize=9, fontweight="bold"
+                    )
+
+        fig.suptitle(
+            f"Matrices de Confusión Post-Recalibración Bayesiana ({nota_peso})",
+            fontsize=12,
+            fontweight="bold",
+            y=1.01
+        )
+        plt.tight_layout()
+        fpath_grid = out_dir / "matrices_confusion_recalibradas.png"
+        plt.savefig(fpath_grid, bbox_inches="tight")
+        plt.close()
+        rutas_generadas.append(fpath_grid)
+
+    return rutas_generadas
+
 def calcular_metricas_macro(serie_estimada: pd.Series, serie_referencia: pd.Series) -> Dict[str, float]:
     df_comp = pd.DataFrame({"est": serie_estimada, "ref": serie_referencia}).dropna()
     if len(df_comp) == 0:
@@ -280,6 +403,15 @@ def main():
             sample_weight=w_micro,
             out_dir=OUT_DIR
         )
+
+        rutas_cm_post = graficar_matrices_confusion_post_calibracion(
+            dfs_familia=dfs_familia,
+            y_true=y_true,
+            sample_weight=w_micro,
+            out_dir=OUT_DIR,
+            df_super=df_base if tiene_super_ensamble else None
+        )
+        rutas_cm.extend(rutas_cm_post)
 
         for fam, df_f in dfs_familia.items():
             col_vot_f2 = f"pred_{fam}_ensamble_votacion"
